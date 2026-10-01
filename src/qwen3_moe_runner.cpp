@@ -249,12 +249,12 @@ public:
         : model_path(std::move(path)), gguf(model_path),
           file(std::make_shared<storage::ModelFile>(model_path)), index(gguf), tokenizer(gguf) {
         const auto& config = index.config();
-        const auto model_context = as_size(config.context_length, "context_length");
-        // Full advertised contexts require multiple gigabytes of FP32 KV state on MoE models.
-        // Start with a mobile-sized window and let callers opt into a larger allocation.
+        model_context = as_size(config.context_length, "context_length");
+        // Keep KV residency bounded for mobile devices. The ring retains the most
+        // recent tokens while positions continue to advance across the full model context.
         context_capacity = requested_context == 0 ? std::min<std::size_t>(model_context, 512) : requested_context;
         if (context_capacity == 0 || context_capacity > model_context) {
-            throw std::invalid_argument("requested context exceeds Qwen3-MoE model context");
+            throw std::invalid_argument("requested KV window exceeds Qwen3-MoE model context");
         }
         const auto layer_count = as_size(config.block_count, "block_count");
         const auto key_dim = as_size(config.key_length, "key_length");
@@ -296,6 +296,7 @@ public:
     std::shared_ptr<storage::ModelFile> file;
     Qwen3MoeIndex index;
     QwenBpeTokenizer tokenizer;
+    std::size_t model_context{};
     std::size_t context_capacity{};
     std::uint64_t next_position{};
     std::vector<float> output_norm;
@@ -313,7 +314,7 @@ public:
                                bool calculate_logits = true) {
         const auto& config = index.config();
         if (token_id >= index.vocabulary_size()) throw std::out_of_range("token id exceeds model vocabulary");
-        if (position != next_position || position >= context_capacity) {
+        if (position != next_position || position >= model_context) {
             throw std::invalid_argument("token position is not the next position in this decode state");
         }
         try {
@@ -452,8 +453,8 @@ public:
                                         const GenerationOptions& options) {
         reset();
         if (prompt.empty()) throw std::invalid_argument("generation prompt must contain at least one token");
-        if (prompt.size() > context_capacity || max_new_tokens > context_capacity - prompt.size()) {
-            throw std::length_error("prompt and generation length exceed KV context capacity");
+        if (prompt.size() > model_context || max_new_tokens > model_context - prompt.size()) {
+            throw std::length_error("prompt and generation length exceed model context");
         }
         std::vector<std::uint32_t> history(prompt.begin(), prompt.end());
         std::vector<std::uint32_t> generated;

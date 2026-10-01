@@ -41,8 +41,9 @@ typedef struct pokitlms_expert_cache_stats {
     uint64_t misses;
 } pokitlms_expert_cache_stats;
 
-// Creates a single-sequence Qwen3-MoE model handle. Zero cache/context values
-// select runner defaults. Error text, when provided, is truncated and NUL-terminated.
+// Creates a single-sequence Qwen3-MoE model handle. context_capacity sets the
+// resident KV window (older positions roll out); zero selects the mobile default.
+// Error text, when provided, is truncated and NUL-terminated.
 pokitlms_status pokitlms_qwen3moe_create(
     const char* model_path, size_t expert_cache_budget_bytes, size_t context_capacity,
     pokitlms_model** out_model, char* error_buffer, size_t error_capacity);

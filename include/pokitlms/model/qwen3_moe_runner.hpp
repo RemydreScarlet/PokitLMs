@@ -37,7 +37,7 @@ class Qwen3MoeRunner {
 public:
     explicit Qwen3MoeRunner(std::filesystem::path model_path,
                             std::size_t expert_cache_budget_bytes = 128U * 1024U * 1024U,
-                            std::size_t context_capacity = 0);
+                            std::size_t context_capacity = 0); // KV window; 0 selects a mobile default.
     ~Qwen3MoeRunner();
     Qwen3MoeRunner(Qwen3MoeRunner&&) noexcept;
     Qwen3MoeRunner& operator=(Qwen3MoeRunner&&) noexcept;
