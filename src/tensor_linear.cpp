@@ -18,7 +18,7 @@ void tensor_linear(const TensorReader& weights, std::span<const float> input,
         throw std::invalid_argument("GGUF matrix dimensions do not match linear input/output");
     }
 
-    const bool floating = tensor.type == 0 || tensor.type == 1;
+    const bool floating = tensor.type == 0 || tensor.type == 1 || tensor.type == 30;
     const bool quantized = tensor.type == 2 || tensor.type == 8 || tensor.type == 10 ||
         tensor.type == 11 || tensor.type == 12 || tensor.type == 13 || tensor.type == 14;
     if (!floating && !quantized) {

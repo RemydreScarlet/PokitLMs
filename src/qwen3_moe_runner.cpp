@@ -318,7 +318,8 @@ public:
         try {
             TensorReader embeddings(file, index.token_embedding());
             std::vector<float> hidden;
-            if (index.token_embedding().type == 0 || index.token_embedding().type == 1) {
+            if (index.token_embedding().type == 0 || index.token_embedding().type == 1 ||
+                index.token_embedding().type == 30) {
                 hidden = embeddings.read_float_rows(token_id, 1);
             } else {
                 const auto encoded = embeddings.read_rows(token_id, 1);

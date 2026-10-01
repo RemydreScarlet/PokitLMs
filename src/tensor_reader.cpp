@@ -119,8 +119,8 @@ std::vector<std::byte> TensorReader::read_rows(std::uint64_t first_row,
 
 std::vector<float> TensorReader::read_float_rows(std::uint64_t first_row,
                                                  std::size_t rows) const {
-    if (tensor_.type != 0 && tensor_.type != 1) {
-        throw std::invalid_argument("float row access only supports GGUF F32 and F16 tensors");
+    if (tensor_.type != 0 && tensor_.type != 1 && tensor_.type != 30) {
+        throw std::invalid_argument("float row access supports GGUF F32, F16, and BF16 tensors");
     }
     const std::size_t element_bytes = tensor_.type == 0 ? 4 : 2;
     const auto elements_per_row = tensor_.dimensions.front();
@@ -137,6 +137,10 @@ std::vector<float> TensorReader::read_float_rows(std::uint64_t first_row,
     std::vector<float> values(static_cast<std::size_t>(elements_per_row) * rows);
     if (tensor_.type == 0) {
         for (std::size_t i = 0; i < values.size(); ++i) values[i] = std::bit_cast<float>(read_u32(bytes.data() + i * 4));
+    } else if (tensor_.type == 30) {
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            values[i] = std::bit_cast<float>(static_cast<std::uint32_t>(read_u16(bytes.data() + i * 2)) << 16);
+        }
     } else {
         for (std::size_t i = 0; i < values.size(); ++i) values[i] = half_to_float(read_u16(bytes.data() + i * 2));
     }
