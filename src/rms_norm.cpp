@@ -1,4 +1,5 @@
 #include "pokitlms/ops/rms_norm.hpp"
+#include "simd_kernels.hpp"
 
 #include <cmath>
 #include <stdexcept>
@@ -17,17 +18,12 @@ void rms_norm(
         return;
     }
 
-    float sum_squares = 0.0F;
-    for (const float value : input) {
-        sum_squares += value * value;
-    }
+    const float sum_squares = detail::dot_f32(input.data(), input.data(), input.size());
 
     const float mean_square = sum_squares / static_cast<float>(input.size());
     const float scale = 1.0F / std::sqrt(mean_square + epsilon);
 
-    for (std::size_t i = 0; i < input.size(); ++i) {
-        output[i] = input[i] * scale * weight[i];
-    }
+    detail::rms_scale_f32(input.data(), weight.data(), output.data(), scale, input.size());
 }
 
 }  // namespace pokitlms
