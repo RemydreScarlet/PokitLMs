@@ -128,6 +128,13 @@ struct ExpertWeights {
     std::shared_ptr<const std::vector<std::byte>> down;
 };
 
+struct SamplingScratch {
+    std::vector<float> adjusted_logits;
+    std::vector<bool> seen_tokens;
+    std::vector<std::pair<double, std::uint32_t>> ranked_tokens;
+    std::vector<double> weights;
+};
+
 class ExpertLoader {
 public:
     ExpertLoader() {
@@ -239,7 +246,8 @@ std::vector<Route> route_experts(std::span<const float> logits, std::size_t top_
 std::uint32_t sample_token(std::span<const float> logits,
                            std::span<const std::uint32_t> history,
                            const GenerationOptions& options,
-                           std::mt19937_64& random) {
+                           std::mt19937_64& random,
+                           SamplingScratch& scratch) {
     if (!std::isfinite(options.temperature) || options.temperature < 0.0F ||
         !std::isfinite(options.top_p) || options.top_p <= 0.0F || options.top_p > 1.0F ||
         !std::isfinite(options.repetition_penalty) || options.repetition_penalty <= 0.0F) {
@@ -262,14 +270,15 @@ std::uint32_t sample_token(std::span<const float> logits,
         }
         return static_cast<std::uint32_t>(best_id);
     }
-    std::vector<float> adjusted;
     std::span<const float> sampling_logits = logits;
     if (options.repetition_penalty != 1.0F) {
+        auto& adjusted = scratch.adjusted_logits;
         adjusted.assign(logits.begin(), logits.end());
         for (const float logit : adjusted) {
             if (!std::isfinite(logit)) throw std::runtime_error("model produced non-finite logits");
         }
-        std::vector<bool> seen(adjusted.size(), false);
+        auto& seen = scratch.seen_tokens;
+        seen.assign(adjusted.size(), false);
         for (const auto id : history) {
             if (id >= adjusted.size()) continue;
             if (seen[id]) continue;
@@ -296,7 +305,8 @@ std::uint32_t sample_token(std::span<const float> logits,
         for (const float logit : sampling_logits) {
             max_logit = std::max(max_logit, static_cast<double>(logit) * inverse_temperature);
         }
-        std::vector<double> weights;
+        auto& weights = scratch.weights;
+        weights.clear();
         weights.reserve(sampling_logits.size());
         for (const float logit : sampling_logits) {
             weights.push_back(std::exp(static_cast<double>(logit) * inverse_temperature - max_logit));
@@ -305,7 +315,8 @@ std::uint32_t sample_token(std::span<const float> logits,
         return static_cast<std::uint32_t>(distribution(random));
     }
 
-    std::vector<std::pair<double, std::uint32_t>> ranked;
+    auto& ranked = scratch.ranked_tokens;
+    ranked.clear();
     ranked.reserve(sampling_logits.size());
     for (std::size_t id = 0; id < sampling_logits.size(); ++id) {
         ranked.emplace_back(static_cast<double>(sampling_logits[id]) * inverse_temperature,
@@ -323,7 +334,8 @@ std::uint32_t sample_token(std::span<const float> logits,
 
     double max_logit = -std::numeric_limits<double>::infinity();
     for (const auto& item : ranked) max_logit = std::max(max_logit, item.first);
-    std::vector<double> weights;
+    auto& weights = scratch.weights;
+    weights.clear();
     weights.reserve(ranked.size());
     double total = 0.0;
     for (const auto& item : ranked) {
@@ -493,6 +505,7 @@ public:
     std::vector<std::uint32_t> session_tokens;
     std::vector<float> session_logits;
     std::vector<AssistantTokenSequence> assistant_token_sequences;
+    SamplingScratch sampling_scratch;
     ExpertLoader expert_loader;
 
     void forward_into(std::uint32_t token_id, std::uint64_t position,
@@ -712,7 +725,8 @@ public:
             std::mt19937_64 random(options.seed);
             generated.reserve(max_new_tokens);
             for (std::size_t i = 0; i < max_new_tokens; ++i) {
-                const auto token = sample_token(session_logits, history, options, random);
+                const auto token = sample_token(session_logits, history, options, random,
+                                                sampling_scratch);
                 generated.push_back(token);
                 if (options.repetition_penalty != 1.0F) history.push_back(token);
                 if (token == tokenizer.eos_token_id()) break;
