@@ -51,6 +51,8 @@ public:
     std::size_t capacity_bytes;
     std::size_t resident_bytes{};
     std::uint64_t disk_bytes{};
+    std::uint64_t hits{};
+    std::uint64_t misses{};
     mutable std::mutex mutex;
     using Entry = std::pair<std::size_t, std::shared_ptr<const std::vector<std::byte>>>;
     std::list<Entry> lru;
@@ -77,9 +79,11 @@ std::shared_ptr<const std::vector<std::byte>> ExpertStore::get(std::size_t exper
     {
         std::lock_guard lock(impl_->mutex);
         if (const auto found = impl_->lookup.find(expert_id); found != impl_->lookup.end()) {
+            ++impl_->hits;
             impl_->lru.splice(impl_->lru.begin(), impl_->lru, found->second);
             return found->second->second;
         }
+        ++impl_->misses;
     }
 
     const auto slice = impl_->experts[expert_id];
@@ -121,6 +125,18 @@ std::uint64_t ExpertStore::bytes_read_from_disk() const {
     if (!impl_) return 0;
     std::lock_guard lock(impl_->mutex);
     return impl_->disk_bytes;
+}
+
+std::uint64_t ExpertStore::cache_hits() const {
+    if (!impl_) return 0;
+    std::lock_guard lock(impl_->mutex);
+    return impl_->hits;
+}
+
+std::uint64_t ExpertStore::cache_misses() const {
+    if (!impl_) return 0;
+    std::lock_guard lock(impl_->mutex);
+    return impl_->misses;
 }
 
 void ExpertStore::clear_cache() {

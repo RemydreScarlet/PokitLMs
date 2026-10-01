@@ -23,6 +23,14 @@ struct GenerationOptions {
     std::uint64_t seed{};
 };
 
+struct ExpertCacheStats {
+    std::size_t capacity_bytes{};
+    std::size_t resident_bytes{};
+    std::uint64_t bytes_read{};
+    std::uint64_t hits{};
+    std::uint64_t misses{};
+};
+
 // Single-sequence Qwen3-MoE decoder. The model tensors remain file-backed;
 // only KV state, small norm vectors, and the selected experts are resident.
 class Qwen3MoeRunner {
@@ -52,6 +60,7 @@ public:
     void reset();
     [[nodiscard]] const TransformerConfig& config() const noexcept;
     [[nodiscard]] std::uint64_t bytes_read_from_disk() const noexcept;
+    [[nodiscard]] ExpertCacheStats expert_cache_stats() const;
 
 private:
     class Impl;

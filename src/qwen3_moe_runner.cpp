@@ -353,6 +353,23 @@ public:
         next_position = 0;
     }
 
+    ExpertCacheStats cache_stats() const {
+        ExpertCacheStats stats;
+        const auto accumulate = [&stats](const auto& stores) {
+            for (const auto& store : stores) {
+                stats.capacity_bytes += store->cache_capacity_bytes();
+                stats.resident_bytes += store->cache_bytes();
+                stats.bytes_read += store->bytes_read_from_disk();
+                stats.hits += store->cache_hits();
+                stats.misses += store->cache_misses();
+            }
+        };
+        accumulate(gate_stores);
+        accumulate(up_stores);
+        accumulate(down_stores);
+        return stats;
+    }
+
     std::vector<std::uint32_t> generate(std::span<const std::uint32_t> prompt,
                                         std::size_t max_new_tokens,
                                         const GenerationOptions& options) {
@@ -427,6 +444,9 @@ const TransformerConfig& Qwen3MoeRunner::config() const noexcept {
 }
 std::uint64_t Qwen3MoeRunner::bytes_read_from_disk() const noexcept {
     return impl_ && impl_->file ? impl_->file->bytes_read() : 0;
+}
+ExpertCacheStats Qwen3MoeRunner::expert_cache_stats() const {
+    return impl_ ? impl_->cache_stats() : ExpertCacheStats{};
 }
 
 }  // namespace pokitlms::model
