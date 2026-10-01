@@ -83,7 +83,7 @@ void quantize_q8_block(const float* source, std::int8_t* destination,
 
 KvCache::KvCache(std::size_t capacity, std::size_t kv_heads,
                  std::size_t key_dimension, std::size_t value_dimension,
-                 KvCachePrecision precision)
+                 KvCachePrecision precision, std::size_t query_heads)
     : capacity_(capacity), precision_(precision), kv_heads_(kv_heads), key_dimension_(key_dimension),
       value_dimension_(value_dimension),
       keys_(precision == KvCachePrecision::Float32
@@ -116,6 +116,15 @@ KvCache::KvCache(std::size_t capacity, std::size_t kv_heads,
     if (precision_ != KvCachePrecision::Float32 && precision_ != KvCachePrecision::Float16 &&
         precision_ != KvCachePrecision::Q8_0) {
         throw std::invalid_argument("unsupported KV cache precision");
+    }
+    if (query_heads != 0) {
+        if (query_heads % kv_heads_ != 0) {
+            throw std::invalid_argument("query heads must be evenly grouped over KV heads");
+        }
+        score_group_capacity_ = query_heads / kv_heads_;
+        scores_.resize(checked_product(capacity_, score_group_capacity_));
+        attention_max_scratch_.resize(score_group_capacity_);
+        attention_sum_scratch_.resize(score_group_capacity_);
     }
 }
 

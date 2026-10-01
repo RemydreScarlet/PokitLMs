@@ -15,7 +15,8 @@ class KvCache {
 public:
     KvCache(std::size_t capacity, std::size_t kv_heads,
             std::size_t key_dimension, std::size_t value_dimension,
-            KvCachePrecision precision = KvCachePrecision::Float32);
+            KvCachePrecision precision = KvCachePrecision::Float32,
+            std::size_t query_heads = 0);
 
     void append(std::uint64_t position, const float* keys, std::size_t key_count,
                 const float* values, std::size_t value_count);

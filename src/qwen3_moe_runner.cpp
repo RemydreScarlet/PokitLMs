@@ -457,7 +457,7 @@ public:
             key_norms.push_back(load_vector(file, block.key_norm));
             feed_forward_norms.push_back(load_vector(file, block.feed_forward_norm));
             kv_caches.emplace_back(context_capacity, kv_heads, key_dim, value_dim,
-                                   kv_precision);
+                                   kv_precision, query_heads);
             block_readers.emplace_back(file, block);
             gate_stores.push_back(std::make_unique<storage::ExpertStore>(
                 file, expert_slices[layer][0], cache_capacities[layer * 3]));
