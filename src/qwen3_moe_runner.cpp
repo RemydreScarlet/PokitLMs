@@ -91,12 +91,29 @@ TensorInfo expert_view(const TensorInfo& tensor, const storage::ExpertSlice& sli
     return result;
 }
 
+void prepare_qwen_rope(std::uint64_t position, std::size_t rotary_dimension, float theta,
+                       std::span<float> cosine, std::span<float> sine) {
+    if (rotary_dimension == 0 || rotary_dimension % 2 != 0 ||
+        cosine.size() != rotary_dimension / 2 || sine.size() != cosine.size() ||
+        !std::isfinite(theta) || theta <= 0.0F) {
+        throw std::invalid_argument("invalid Qwen RoPE parameters");
+    }
+    const auto half = rotary_dimension / 2;
+    for (std::size_t pair = 0; pair < half; ++pair) {
+        const float angle = static_cast<float>(position) *
+            std::pow(theta, -static_cast<float>(pair) / static_cast<float>(half));
+        cosine[pair] = std::cos(angle);
+        sine[pair] = std::sin(angle);
+    }
+}
+
 void apply_qwen_rope(std::span<float> values, std::size_t head_dimension,
-                     std::size_t rotary_dimension, std::uint64_t position, float theta) {
+                     std::size_t rotary_dimension, std::span<const float> cosine,
+                     std::span<const float> sine) {
     if (head_dimension == 0 || values.size() % head_dimension != 0 ||
         rotary_dimension == 0 || rotary_dimension > head_dimension ||
-        rotary_dimension % 2 != 0 ||
-        !std::isfinite(theta) || theta <= 0.0F) {
+        rotary_dimension % 2 != 0 || cosine.size() != rotary_dimension / 2 ||
+        sine.size() != cosine.size()) {
         throw std::invalid_argument("invalid Qwen RoPE parameters");
     }
     const auto heads = values.size() / head_dimension;
@@ -104,14 +121,10 @@ void apply_qwen_rope(std::span<float> values, std::size_t head_dimension,
     for (std::size_t head = 0; head < heads; ++head) {
         auto* vector = values.data() + head * head_dimension;
         for (std::size_t pair = 0; pair < half; ++pair) {
-            const float angle = static_cast<float>(position) *
-                std::pow(theta, -static_cast<float>(pair) / static_cast<float>(half));
-            const float cosine = std::cos(angle);
-            const float sine = std::sin(angle);
             const float first = vector[pair];
             const float second = vector[pair + half];
-            vector[pair] = first * cosine - second * sine;
-            vector[pair + half] = second * cosine + first * sine;
+            vector[pair] = first * cosine[pair] - second * sine[pair];
+            vector[pair + half] = second * cosine[pair] + first * sine[pair];
         }
     }
 }
@@ -389,6 +402,7 @@ public:
         const auto layer_count = as_size(config.block_count, "block_count");
         const auto key_dim = as_size(config.key_length, "key_length");
         const auto value_dim = as_size(config.value_length, "value_length");
+        const auto rotary_dim = as_size(config.rotary_dimension, "rotary_dimension");
         const auto kv_heads = as_size(config.key_value_heads, "key_value_heads");
         const auto hidden_size = as_size(config.embedding_length, "embedding_length");
         const auto query_heads = as_size(config.attention_heads, "attention_heads");
@@ -410,6 +424,8 @@ public:
         scratch.activated.resize(intermediate_size);
         scratch.expert_output.resize(hidden_size);
         scratch.final_hidden.resize(hidden_size);
+        scratch.rope_cosine.resize(rotary_dim / 2);
+        scratch.rope_sine.resize(rotary_dim / 2);
         if (layer_count > std::numeric_limits<std::size_t>::max() / 3) {
             throw std::invalid_argument("model has too many layers for expert cache accounting");
         }
@@ -495,6 +511,8 @@ public:
         std::vector<float> activated;
         std::vector<float> expert_output;
         std::vector<float> final_hidden;
+        std::vector<float> rope_cosine;
+        std::vector<float> rope_sine;
         TensorLinearScratch tensor_linear;
     } scratch;
     struct AssistantTokenSequence {
@@ -536,6 +554,8 @@ public:
             const auto rotary_dim = as_size(config.rotary_dimension, "rotary_dimension");
             const auto epsilon = static_cast<float>(config.rms_norm_epsilon);
             const auto theta = static_cast<float>(config.rope_frequency_base);
+            prepare_qwen_rope(position, rotary_dim, theta,
+                              scratch.rope_cosine, scratch.rope_sine);
             for (std::size_t layer = 0; layer < index.blocks().size(); ++layer) {
                 const auto& block = index.blocks()[layer];
                 const auto& readers = block_readers[layer];
@@ -557,8 +577,10 @@ public:
                     rms_norm(std::span<const float>(begin, key_dim), key_norms[layer],
                              std::span<float>(begin, key_dim), epsilon);
                 }
-                apply_qwen_rope(query, key_dim, rotary_dim, position, theta);
-                apply_qwen_rope(key, key_dim, rotary_dim, position, theta);
+                apply_qwen_rope(query, key_dim, rotary_dim,
+                                scratch.rope_cosine, scratch.rope_sine);
+                apply_qwen_rope(key, key_dim, rotary_dim,
+                                scratch.rope_cosine, scratch.rope_sine);
                 kv_caches[layer].append(position, key.data(), key.size(), value.data(), value.size());
                 auto& attended = scratch.attended;
                 kv_caches[layer].attend(query.data(), query.size(), attended.data(), attended.size());
