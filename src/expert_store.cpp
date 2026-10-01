@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <list>
 #include <mutex>
 #include <stdexcept>
@@ -67,6 +68,10 @@ std::shared_ptr<const std::vector<std::byte>> ExpertStore::get(std::size_t exper
     }
 
     const auto slice = impl_->experts[expert_id];
+    if (slice.size > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()) ||
+        slice.offset > static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max())) {
+        throw std::runtime_error("expert slice exceeds stream I/O limits");
+    }
     auto bytes = std::make_shared<std::vector<std::byte>>(slice.size);
     impl_->stream.clear();
     impl_->stream.seekg(static_cast<std::streamoff>(slice.offset), std::ios::beg);

@@ -5,7 +5,6 @@
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
-#include <unordered_set>
 
 namespace pokitlms::model {
 namespace {
@@ -115,7 +114,8 @@ GgufReader::GgufReader(std::filesystem::path path) {
     if (version_ != 3) throw std::runtime_error("only GGUF version 3 is supported");
     const auto tensor_count = reader.integer<std::uint64_t>();
     const auto metadata_count = reader.integer<std::uint64_t>();
-    if (tensor_count > kMaxTensors || metadata_count > kMaxMetadataEntries) {
+    if (tensor_count > kMaxTensors || tensor_count > reader.remaining() / 32 ||
+        metadata_count > kMaxMetadataEntries || metadata_count > reader.remaining() / 13) {
         throw std::runtime_error("GGUF directory exceeds implementation limits");
     }
 
@@ -129,7 +129,7 @@ GgufReader::GgufReader(std::filesystem::path path) {
     }
 
     tensors_.reserve(static_cast<std::size_t>(tensor_count));
-    std::unordered_set<std::string> names;
+    tensor_lookup_.reserve(static_cast<std::size_t>(tensor_count));
     for (std::uint64_t i = 0; i < tensor_count; ++i) {
         TensorInfo tensor;
         tensor.name = reader.string();
@@ -143,7 +143,8 @@ GgufReader::GgufReader(std::filesystem::path path) {
         }
         tensor.type = reader.integer<std::uint32_t>();
         tensor.file_offset = reader.integer<std::uint64_t>();
-        if (!names.insert(tensor.name).second) throw std::runtime_error("duplicate GGUF tensor name");
+        if (tensor_lookup_.contains(tensor.name)) throw std::runtime_error("duplicate GGUF tensor name");
+        tensor_lookup_.emplace(tensor.name, tensors_.size());
         tensors_.push_back(std::move(tensor));
     }
 
@@ -173,8 +174,8 @@ std::uint32_t GgufReader::version() const noexcept { return version_; }
 const std::map<std::string, MetadataValue, std::less<>>& GgufReader::metadata() const noexcept { return metadata_; }
 const std::vector<TensorInfo>& GgufReader::tensors() const noexcept { return tensors_; }
 const TensorInfo* GgufReader::find_tensor(const std::string& name) const noexcept {
-    for (const auto& tensor : tensors_) if (tensor.name == name) return &tensor;
-    return nullptr;
+    const auto found = tensor_lookup_.find(name);
+    return found == tensor_lookup_.end() ? nullptr : &tensors_[found->second];
 }
 std::uint64_t GgufReader::data_offset() const noexcept { return data_offset_; }
 std::uint64_t GgufReader::file_size() const noexcept { return file_size_; }

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -40,6 +41,7 @@ private:
     std::uint64_t file_size_{};
     std::map<std::string, MetadataValue, std::less<>> metadata_;
     std::vector<TensorInfo> tensors_;
+    std::unordered_map<std::string, std::size_t> tensor_lookup_;
 };
 
 }  // namespace pokitlms::model
