@@ -121,6 +121,21 @@ inline void rms_scale_f32(const float* input, const float* weight, float* output
     for (; i < count; ++i) output[i] = input[i] * scale * weight[i];
 }
 
+inline void rms_scale_one_plus_f32(const float* input, const float* weight, float* output,
+                                   float scale, std::size_t count) noexcept {
+    std::size_t i = 0;
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    const float32x4_t factor = vdupq_n_f32(scale);
+    const float32x4_t one = vdupq_n_f32(1.0F);
+    for (; i + 4 <= count; i += 4) {
+        const auto values = vld1q_f32(input + i);
+        const auto weights = vaddq_f32(vld1q_f32(weight + i), one);
+        vst1q_f32(output + i, vmulq_f32(vmulq_f32(values, factor), weights));
+    }
+#endif
+    for (; i < count; ++i) output[i] = input[i] * scale * (1.0F + weight[i]);
+}
+
 inline void scale_add_f32(float* destination, const float* source, float scale,
                           std::size_t count) noexcept {
     std::size_t i = 0;
