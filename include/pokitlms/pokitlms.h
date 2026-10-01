@@ -56,6 +56,8 @@ typedef enum pokitlms_kv_cache_precision {
 // Creates a single-sequence Qwen3-MoE model handle. context_capacity sets the
 // resident KV window (older positions roll out); zero selects the mobile default.
 // The default constructor stores KV values in FP16; use create_ex to select Q8_0.
+// Pass SIZE_MAX for expert_cache_budget_bytes to size the cache from currently
+// available system memory; zero disables expert caching.
 // Error text, when provided, is truncated and NUL-terminated.
 pokitlms_status pokitlms_qwen3moe_create(
     const char* model_path, size_t expert_cache_budget_bytes, size_t context_capacity,

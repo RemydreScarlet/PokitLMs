@@ -38,7 +38,7 @@ double tokens_per_second(std::size_t tokens, std::uint64_t nanoseconds) {
 
 void print_usage(const char* executable) {
     std::cerr << "Usage: " << executable
-              << " MODEL.gguf USER_MESSAGE [new_tokens=32] [expert_cache_mib=128] [kv_window=0] [kv_precision=fp16|q8]\n";
+              << " MODEL.gguf USER_MESSAGE [new_tokens=32] [expert_cache_mib=auto|128] [kv_window=0] [kv_precision=fp16|q8]\n";
 }
 
 }  // namespace
@@ -51,7 +51,9 @@ int main(int argc, char** argv) {
 
     try {
         const auto max_new_tokens = argc > 3 ? parse_size(argv[3], "new token count") : 32;
-        const auto cache_mib = argc > 4 ? parse_size(argv[4], "expert cache MiB") : 128;
+        const bool auto_cache = argc > 4 && std::string_view(argv[4]) == "auto";
+        const auto cache_mib = argc > 4 && !auto_cache
+            ? parse_size(argv[4], "expert cache MiB") : (argc > 4 ? 0U : 128U);
         const auto kv_window = argc > 5 ? parse_size(argv[5], "KV window") : 0;
         pokitlms::KvCachePrecision kv_precision = pokitlms::KvCachePrecision::Float16;
         if (argc > 6) {
@@ -69,7 +71,9 @@ int main(int argc, char** argv) {
         pokitlms::model::QwenBpeTokenizer tokenizer(tokenizer_model);
 
         const auto load_start = std::chrono::steady_clock::now();
-        pokitlms::model::Qwen3MoeRunner runner(model_path, cache_mib * mib, kv_window,
+        const auto cache_budget = auto_cache
+            ? pokitlms::model::kAutoExpertCacheBudget : cache_mib * mib;
+        pokitlms::model::Qwen3MoeRunner runner(model_path, cache_budget, kv_window,
                                                 kv_precision);
         const auto load_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - load_start).count();

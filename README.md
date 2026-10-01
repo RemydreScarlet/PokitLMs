@@ -73,10 +73,11 @@ decode throughput, total bytes read, and expert-cache latency and hit rate. It
 is built by default for host and Android builds:
 
 ```bash
-./build/pokitlms-bench MODEL.gguf "Explain MoE routing" 64 256 512 q8
+./build/pokitlms-bench MODEL.gguf "Explain MoE routing" 64 auto 512 q8
 ```
 
-The positional options are generated token limit, expert-cache MiB, KV
+The positional options are generated token limit, expert-cache MiB (`auto`
+uses one quarter of currently available memory, capped at 4 GiB), KV
 window size, and KV precision (`fp16` or `q8`). A KV window of zero selects
 the mobile default. The output reply
 goes to stdout and the measurements go to stderr.

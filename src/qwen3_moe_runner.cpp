@@ -14,6 +14,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <deque>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <limits>
@@ -25,6 +26,13 @@
 #include <type_traits>
 #include <utility>
 
+#if !defined(_WIN32)
+#include <unistd.h>
+#else
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace pokitlms::model {
 namespace {
 
@@ -33,6 +41,42 @@ std::size_t as_size(std::uint64_t value, const char* label) {
         throw std::invalid_argument(std::string("model dimension exceeds address space: ") + label);
     }
     return static_cast<std::size_t>(value);
+}
+
+std::size_t auto_expert_cache_budget() {
+    constexpr std::size_t fallback = 128U * 1024U * 1024U;
+    constexpr std::size_t ceiling = 4U * 1024U * 1024U * 1024U;
+    std::uint64_t available_bytes = 0;
+#if defined(_WIN32)
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (::GlobalMemoryStatusEx(&status)) available_bytes = status.ullAvailPhys;
+#else
+    std::ifstream meminfo("/proc/meminfo");
+    std::string key;
+    std::uint64_t value = 0;
+    std::string unit;
+    while (meminfo >> key >> value >> unit) {
+        if (key == "MemAvailable:" && unit == "kB") {
+            available_bytes = value > std::numeric_limits<std::uint64_t>::max() / 1024U
+                ? std::numeric_limits<std::uint64_t>::max() : value * 1024U;
+            break;
+        }
+    }
+    if (available_bytes == 0) {
+        const auto pages = ::sysconf(_SC_AVPHYS_PAGES);
+        const auto page_size = ::sysconf(_SC_PAGESIZE);
+        if (pages > 0 && page_size > 0 &&
+            static_cast<std::uint64_t>(pages) <=
+                std::numeric_limits<std::uint64_t>::max() / static_cast<std::uint64_t>(page_size)) {
+            available_bytes = static_cast<std::uint64_t>(pages) *
+                              static_cast<std::uint64_t>(page_size);
+        }
+    }
+#endif
+    if (available_bytes == 0) return fallback;
+    const auto quarter = available_bytes / 4U;
+    return static_cast<std::size_t>(std::min<std::uint64_t>(quarter, ceiling));
 }
 
 std::vector<std::size_t> allocate_expert_cache_budgets(
@@ -439,8 +483,10 @@ public:
             }
             expert_slices.push_back(std::move(slices));
         }
+        const auto resolved_cache_budget = cache_budget == kAutoExpertCacheBudget
+            ? auto_expert_cache_budget() : cache_budget;
         const auto cache_capacities = allocate_expert_cache_budgets(expert_slice_sizes,
-                                                                     cache_budget);
+                                                                     resolved_cache_budget);
         attention_norms.reserve(layer_count);
         query_norms.reserve(layer_count);
         key_norms.reserve(layer_count);

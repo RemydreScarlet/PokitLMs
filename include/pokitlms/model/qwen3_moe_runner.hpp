@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -15,6 +16,11 @@
 #include <vector>
 
 namespace pokitlms::model {
+
+// Pass this value to size the expert cache from currently available system
+// memory. A literal zero continues to disable expert caching.
+inline constexpr std::size_t kAutoExpertCacheBudget =
+    std::numeric_limits<std::size_t>::max();
 
 struct GenerationOptions {
     float temperature{};                 // 0 selects greedy decoding.
