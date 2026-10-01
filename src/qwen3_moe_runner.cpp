@@ -218,7 +218,8 @@ public:
             query_norms.push_back(load_vector(file, block.query_norm));
             key_norms.push_back(load_vector(file, block.key_norm));
             feed_forward_norms.push_back(load_vector(file, block.feed_forward_norm));
-            kv_caches.emplace_back(context_capacity, kv_heads, key_dim, value_dim);
+            kv_caches.emplace_back(context_capacity, kv_heads, key_dim, value_dim,
+                                   KvCachePrecision::Float16);
             gate_stores.push_back(std::make_unique<storage::ExpertStore>(
                 file, storage::split_expert_tensor(block.expert_gate, expert_count), per_store_budget));
             up_stores.push_back(std::make_unique<storage::ExpertStore>(

@@ -1,5 +1,6 @@
 #include "pokitlms/ops/kv_cache.hpp"
 
+#include <bit>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -15,14 +16,66 @@ std::size_t checked_product(std::size_t lhs, std::size_t rhs) {
     return lhs * rhs;
 }
 
+std::uint16_t float_to_half(float value) {
+    const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+    const std::uint16_t sign = static_cast<std::uint16_t>((bits >> 16) & 0x8000U);
+    const std::uint32_t exponent = (bits >> 23) & 0xffU;
+    std::uint32_t mantissa = bits & 0x7fffffU;
+    if (exponent == 0xffU) {
+        return static_cast<std::uint16_t>(sign | 0x7c00U | (mantissa ? 0x0200U : 0U));
+    }
+    int half_exponent = static_cast<int>(exponent) - 127 + 15;
+    if (half_exponent >= 31) return static_cast<std::uint16_t>(sign | 0x7c00U);
+    if (half_exponent <= 0) {
+        if (half_exponent < -10) return sign;
+        mantissa |= 0x800000U;
+        const auto shift = static_cast<unsigned>(14 - half_exponent);
+        const std::uint32_t rounding = (1U << (shift - 1)) - 1U + ((mantissa >> shift) & 1U);
+        return static_cast<std::uint16_t>(sign | ((mantissa + rounding) >> shift));
+    }
+    mantissa += 0x0fffU + ((mantissa >> 13) & 1U);
+    if (mantissa & 0x800000U) {
+        mantissa = 0;
+        if (++half_exponent >= 31) return static_cast<std::uint16_t>(sign | 0x7c00U);
+    }
+    return static_cast<std::uint16_t>(sign | (static_cast<std::uint16_t>(half_exponent) << 10) |
+                                      static_cast<std::uint16_t>(mantissa >> 13));
+}
+
+float half_to_float(std::uint16_t bits) {
+    const std::uint32_t sign = static_cast<std::uint32_t>(bits & 0x8000U) << 16;
+    const std::uint32_t exponent = (bits >> 10) & 0x1fU;
+    std::uint32_t mantissa = bits & 0x03ffU;
+    std::uint32_t result;
+    if (exponent == 0) {
+        if (mantissa == 0) return std::bit_cast<float>(sign);
+        int unbiased = -14;
+        while ((mantissa & 0x0400U) == 0) { mantissa <<= 1; --unbiased; }
+        mantissa &= 0x03ffU;
+        result = sign | (static_cast<std::uint32_t>(unbiased + 127) << 23) | (mantissa << 13);
+    } else if (exponent == 0x1fU) {
+        result = sign | 0x7f800000U | (mantissa << 13);
+    } else {
+        result = sign | ((exponent + 112U) << 23) | (mantissa << 13);
+    }
+    return std::bit_cast<float>(result);
+}
+
 }  // namespace
 
 KvCache::KvCache(std::size_t capacity, std::size_t kv_heads,
-                 std::size_t key_dimension, std::size_t value_dimension)
-    : capacity_(capacity), kv_heads_(kv_heads), key_dimension_(key_dimension),
+                 std::size_t key_dimension, std::size_t value_dimension,
+                 KvCachePrecision precision)
+    : capacity_(capacity), precision_(precision), kv_heads_(kv_heads), key_dimension_(key_dimension),
       value_dimension_(value_dimension),
-      keys_(checked_product(checked_product(capacity, kv_heads), key_dimension)),
-      values_(checked_product(checked_product(capacity, kv_heads), value_dimension)),
+      keys_(precision == KvCachePrecision::Float32
+                ? checked_product(checked_product(capacity, kv_heads), key_dimension) : 0),
+      values_(precision == KvCachePrecision::Float32
+                  ? checked_product(checked_product(capacity, kv_heads), value_dimension) : 0),
+      keys_f16_(precision == KvCachePrecision::Float16
+                    ? checked_product(checked_product(capacity, kv_heads), key_dimension) : 0),
+      values_f16_(precision == KvCachePrecision::Float16
+                      ? checked_product(checked_product(capacity, kv_heads), value_dimension) : 0),
       scores_(capacity) {
     if (capacity == 0 || kv_heads == 0 || key_dimension == 0 || value_dimension == 0) {
         throw std::invalid_argument("KV cache dimensions must be nonzero");
@@ -53,8 +106,15 @@ void KvCache::append(std::uint64_t position, const float* keys, std::size_t key_
     }
 
     const auto slot = static_cast<std::size_t>(position % capacity_);
-    std::copy_n(keys, expected_keys, keys_.data() + slot * expected_keys);
-    std::copy_n(values, expected_values, values_.data() + slot * expected_values);
+    const auto key_offset = slot * expected_keys;
+    const auto value_offset = slot * expected_values;
+    if (precision_ == KvCachePrecision::Float32) {
+        std::copy_n(keys, expected_keys, keys_.data() + key_offset);
+        std::copy_n(values, expected_values, values_.data() + value_offset);
+    } else {
+        for (std::size_t i = 0; i < expected_keys; ++i) keys_f16_[key_offset + i] = float_to_half(keys[i]);
+        for (std::size_t i = 0; i < expected_values; ++i) values_f16_[value_offset + i] = float_to_half(values[i]);
+    }
 }
 
 void KvCache::attend(const float* query, std::size_t query_count, float* output,
@@ -81,9 +141,13 @@ void KvCache::attend(const float* query, std::size_t query_count, float* output,
         for (std::size_t index = 0; index < size_; ++index) {
             const auto position = first_position_ + index;
             const auto slot = static_cast<std::size_t>(position % capacity_);
-            const auto* key = keys_.data() + slot * key_size + kv_head * key_dimension_;
+            const auto key_offset = slot * key_size + kv_head * key_dimension_;
             float score = 0.0F;
-            for (std::size_t d = 0; d < key_dimension_; ++d) score += q[d] * key[d];
+            for (std::size_t d = 0; d < key_dimension_; ++d) {
+                const float key_value = precision_ == KvCachePrecision::Float32
+                    ? keys_[key_offset + d] : half_to_float(keys_f16_[key_offset + d]);
+                score += q[d] * key_value;
+            }
             score *= scale;
             scores_[index] = score;
             max_score = std::max(max_score, score);
@@ -99,9 +163,13 @@ void KvCache::attend(const float* query, std::size_t query_count, float* output,
         for (std::size_t index = 0; index < size_; ++index) {
             const auto position = first_position_ + index;
             const auto slot = static_cast<std::size_t>(position % capacity_);
-            const auto* value = values_.data() + slot * value_size + kv_head * value_dimension_;
+            const auto value_offset = slot * value_size + kv_head * value_dimension_;
             const float probability = scores_[index] / denominator;
-            for (std::size_t d = 0; d < value_dimension_; ++d) out[d] += probability * value[d];
+            for (std::size_t d = 0; d < value_dimension_; ++d) {
+                const float value = precision_ == KvCachePrecision::Float32
+                    ? values_[value_offset + d] : half_to_float(values_f16_[value_offset + d]);
+                out[d] += probability * value;
+            }
         }
     }
 }
@@ -111,7 +179,8 @@ std::size_t KvCache::capacity() const noexcept { return capacity_; }
 std::uint64_t KvCache::first_position() const noexcept { return first_position_; }
 std::uint64_t KvCache::last_position() const noexcept { return last_position_; }
 std::size_t KvCache::storage_bytes() const noexcept {
-    return (keys_.size() + values_.size()) * sizeof(float);
+    return (keys_.size() + values_.size()) * sizeof(float) +
+           (keys_f16_.size() + values_f16_.size()) * sizeof(std::uint16_t);
 }
 void KvCache::clear() noexcept {
     size_ = 0;

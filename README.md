@@ -30,6 +30,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Qwen GPT-2 byte-level BPE encoder/decoder using GGUF vocabulary, merge, token-type, and special-token metadata.
 - Streaming MoE routing callback that selects only the top-k expert IDs with O(top-k) routing memory.
 - Fixed-capacity ring-buffer KV cache and numerically stable grouped-query causal attention primitive.
+- FP16 KV residency option; Qwen3-MoE runner uses it by default to halve cache storage while accumulating attention in FP32.
 - C API version function.
 - Model-specific chat-template handling, broader quantized format coverage, and optimized ARM kernels are not implemented yet. The decode path is currently compile-verified but has not been compared against a reference model output.
 
