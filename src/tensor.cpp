@@ -1,7 +1,7 @@
 #include "pokitlms/tensor.hpp"
 
-#include <numeric>
 #include <stdexcept>
+#include <utility>
 
 namespace pokitlms {
 
