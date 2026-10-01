@@ -290,6 +290,21 @@ std::uint32_t sample_token(std::span<const float> logits,
     }
 
     const double inverse_temperature = 1.0 / static_cast<double>(options.temperature);
+    if (options.top_p == 1.0F &&
+        (options.top_k == 0 || options.top_k >= sampling_logits.size())) {
+        double max_logit = -std::numeric_limits<double>::infinity();
+        for (const float logit : sampling_logits) {
+            max_logit = std::max(max_logit, static_cast<double>(logit) * inverse_temperature);
+        }
+        std::vector<double> weights;
+        weights.reserve(sampling_logits.size());
+        for (const float logit : sampling_logits) {
+            weights.push_back(std::exp(static_cast<double>(logit) * inverse_temperature - max_logit));
+        }
+        std::discrete_distribution<std::size_t> distribution(weights.begin(), weights.end());
+        return static_cast<std::uint32_t>(distribution(random));
+    }
+
     std::vector<std::pair<double, std::uint32_t>> ranked;
     ranked.reserve(sampling_logits.size());
     for (std::size_t id = 0; id < sampling_logits.size(); ++id) {
