@@ -88,7 +88,7 @@ pokitlms_status pokitlms_model_generate_chat(
 
 // Generates a reply from a system/user/assistant history. Messages must
 // alternate user and assistant after an optional leading system message, and
-// the final message must be from the user. The history is re-prefilled each call.
+// the final message must be from the user. A matching prior KV prefix is reused.
 pokitlms_status pokitlms_model_generate_chat_history(
     pokitlms_model* model, const pokitlms_chat_message* messages, size_t message_count,
     size_t max_new_tokens, const pokitlms_generation_options* options,

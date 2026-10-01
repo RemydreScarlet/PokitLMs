@@ -44,6 +44,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - C API version function.
 - C ABI opaque Qwen3-MoE handle for creation, serialized text generation, and cache/storage telemetry.
 - Qwen3 chat helpers for single messages and multi-turn system/user/assistant history in the C++ and C APIs.
+- Multi-turn chat keeps KV state and reuses token-identical history prefixes; generated assistant token IDs are retained so replies are not re-tokenized between turns.
 - Multi-turn chat-template handling, broader quantized format coverage, and optimized ARM kernels are still incomplete. The decode path is compile-verified but has not been compared against a reference model output.
 
 ## Build

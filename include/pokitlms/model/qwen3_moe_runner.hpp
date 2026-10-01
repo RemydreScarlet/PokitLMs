@@ -77,8 +77,8 @@ public:
     [[nodiscard]] std::string generate_chat(
         std::string_view user_message, std::size_t max_new_tokens,
         const GenerationOptions& options = {});
-    // Formats a conversation of system/user/assistant messages. The history is
-    // prefetched from the beginning for each call; the final message must be user.
+    // Formats a conversation of system/user/assistant messages. A token-identical
+    // cached prefix is reused across calls; the final message must be user.
     [[nodiscard]] std::string generate_chat(
         std::span<const ChatMessage> messages, std::size_t max_new_tokens,
         const GenerationOptions& options = {});

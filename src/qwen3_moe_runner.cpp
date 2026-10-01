@@ -385,6 +385,14 @@ public:
     std::vector<std::unique_ptr<storage::ExpertStore>> gate_stores;
     std::vector<std::unique_ptr<storage::ExpertStore>> up_stores;
     std::vector<std::unique_ptr<storage::ExpertStore>> down_stores;
+    struct AssistantTokenSequence {
+        std::size_t message_index{};
+        std::string text;
+        std::vector<std::uint32_t> tokens;
+    };
+    std::vector<std::uint32_t> session_tokens;
+    std::vector<float> session_logits;
+    std::vector<AssistantTokenSequence> assistant_token_sequences;
     ExpertLoader expert_loader;
 
     std::vector<float> forward(std::uint32_t token_id, std::uint64_t position,
@@ -503,8 +511,7 @@ public:
             tensor_linear(TensorReader(file, index.output()), final_hidden, logits);
             return logits;
         } catch (...) {
-            for (auto& cache : kv_caches) cache.clear();
-            next_position = 0;
+            reset();
             throw;
         }
     }
@@ -512,6 +519,9 @@ public:
     void reset() {
         for (auto& cache : kv_caches) cache.clear();
         next_position = 0;
+        session_tokens.clear();
+        session_logits.clear();
+        assistant_token_sequences.clear();
     }
 
     ExpertCacheStats cache_stats() const {
@@ -548,21 +558,37 @@ public:
     std::vector<std::uint32_t> generate(std::span<const std::uint32_t> prompt,
                                         std::size_t max_new_tokens,
                                         const GenerationOptions& options,
-                                        GenerationStats* stats = nullptr) {
+                                        GenerationStats* stats = nullptr,
+                                        bool reuse_session_prefix = false) {
         if (stats) *stats = {};
-        reset();
         if (prompt.empty()) throw std::invalid_argument("generation prompt must contain at least one token");
         if (prompt.size() > model_context || max_new_tokens > model_context - prompt.size()) {
             throw std::length_error("prompt and generation length exceed model context");
         }
+        const bool prefix_matches = reuse_session_prefix &&
+            session_tokens.size() <= prompt.size() &&
+            std::equal(session_tokens.begin(), session_tokens.end(), prompt.begin()) &&
+            next_position == session_tokens.size() &&
+            (session_tokens.size() < prompt.size() || !session_logits.empty());
+        if (!prefix_matches) {
+            if (reuse_session_prefix) {
+                auto retained_assistant_tokens = std::move(assistant_token_sequences);
+                reset();
+                assistant_token_sequences = std::move(retained_assistant_tokens);
+            } else {
+                reset();
+            }
+        }
         std::vector<std::uint32_t> history(prompt.begin(), prompt.end());
         std::vector<std::uint32_t> generated;
         if (max_new_tokens == 0) return generated;
-        std::vector<float> logits;
+        std::vector<float> logits = prefix_matches ? session_logits : std::vector<float>{};
         try {
             const auto prefill_start = std::chrono::steady_clock::now();
-            for (std::size_t i = 0; i < prompt.size(); ++i) {
+            const auto prefill_start_position = session_tokens.size();
+            for (std::size_t i = prefill_start_position; i < prompt.size(); ++i) {
                 logits = forward(prompt[i], i, i + 1 == prompt.size());
+                session_tokens.push_back(prompt[i]);
             }
             if (stats) {
                 stats->prefill_time_ns = static_cast<std::uint64_t>(
@@ -577,7 +603,10 @@ public:
                 generated.push_back(token);
                 history.push_back(token);
                 if (token == tokenizer.eos_token_id()) break;
-                if (i + 1 < max_new_tokens) logits = forward(token, prompt.size() + i);
+                if (i + 1 < max_new_tokens) {
+                    logits = forward(token, prompt.size() + i);
+                    session_tokens.push_back(token);
+                }
             }
             if (stats) {
                 stats->decode_time_ns = static_cast<std::uint64_t>(
@@ -585,6 +614,7 @@ public:
                         std::chrono::steady_clock::now() - decode_start).count());
                 stats->generated_tokens = generated.size();
             }
+            session_logits = std::move(logits);
         } catch (...) {
             reset();
             throw;
@@ -639,7 +669,7 @@ std::string Qwen3MoeRunner::generate_chat(std::span<const ChatMessage> messages,
                                           const GenerationOptions& options) {
     if (!impl_) throw std::logic_error("Qwen3-MoE runner has been moved from");
     if (messages.empty()) throw std::invalid_argument("chat history must contain at least one message");
-    std::string prompt;
+    std::vector<std::uint32_t> prompt_tokens;
     std::string_view previous_role;
     std::size_t content_bytes = 0;
     for (std::size_t i = 0; i < messages.size(); ++i) {
@@ -679,24 +709,50 @@ std::string Qwen3MoeRunner::generate_chat(std::span<const ChatMessage> messages,
     if (content_bytes > std::numeric_limits<std::size_t>::max() - prompt_overhead) {
         throw std::length_error("chat history is too large");
     }
-    prompt.reserve(content_bytes + prompt_overhead);
-    for (const auto& message : messages) {
-        prompt += "<|im_start|>";
-        prompt.append(message.role);
-        prompt.push_back('\n');
-        prompt.append(message.content);
-        prompt += "<|im_end|>\n";
+    prompt_tokens.reserve(content_bytes + prompt_overhead);
+    const auto append_encoded = [this, &prompt_tokens](std::string_view text) {
+        auto encoded = impl_->tokenizer.encode(std::string(text));
+        prompt_tokens.insert(prompt_tokens.end(), encoded.begin(), encoded.end());
+    };
+    for (std::size_t message_index = 0; message_index < messages.size(); ++message_index) {
+        const auto& message = messages[message_index];
+        std::string header = "<|im_start|>";
+        header.append(message.role);
+        header.push_back('\n');
+        const auto assistant_tokens = message.role == "assistant"
+            ? std::find_if(impl_->assistant_token_sequences.rbegin(),
+                           impl_->assistant_token_sequences.rend(),
+                [message_index, &message](
+                    const Impl::AssistantTokenSequence& sequence) {
+                    return sequence.message_index == message_index && sequence.text == message.content;
+                })
+            : impl_->assistant_token_sequences.rend();
+        if (assistant_tokens != impl_->assistant_token_sequences.rend()) {
+            append_encoded(header);
+            prompt_tokens.insert(prompt_tokens.end(), assistant_tokens->tokens.begin(),
+                                 assistant_tokens->tokens.end());
+        } else {
+            header.append(message.content);
+            append_encoded(header);
+        }
+        append_encoded("<|im_end|>\n");
     }
-    prompt += "<|im_start|>assistant\n";
-    auto prompt_tokens = impl_->tokenizer.encode(prompt);
-    const auto generated = impl_->generate(prompt_tokens, max_new_tokens, options);
+    append_encoded("<|im_start|>assistant\n");
+    const auto generated = impl_->generate(prompt_tokens, max_new_tokens, options,
+                                           nullptr, true);
     std::vector<std::uint32_t> printable;
     printable.reserve(generated.size());
     for (const auto token : generated) {
         if (token == impl_->tokenizer.eos_token_id()) break;
         printable.push_back(token);
     }
-    return impl_->tokenizer.decode(printable);
+    auto response = impl_->tokenizer.decode(printable);
+    const auto reply_index = messages.size();
+    std::erase_if(impl_->assistant_token_sequences, [reply_index](const auto& sequence) {
+        return sequence.message_index == reply_index;
+    });
+    impl_->assistant_token_sequences.push_back({reply_index, response, std::move(printable)});
+    return response;
 }
 void Qwen3MoeRunner::reset() { if (impl_) impl_->reset(); }
 const TransformerConfig& Qwen3MoeRunner::config() const noexcept {
