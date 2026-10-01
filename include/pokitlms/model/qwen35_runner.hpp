@@ -7,9 +7,19 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace pokitlms::model {
+
+struct Qwen35GenerationStats {
+    std::uint64_t prefill_time_ns{};
+    std::uint64_t decode_time_ns{};
+    std::size_t prompt_tokens{};
+    std::size_t generated_tokens{};
+};
 
 // Single-sequence Qwen3.5 text decoder. Matrix weights stay file-backed;
 // recurrent, convolution, and bounded full-attention state stay resident.
@@ -26,6 +36,17 @@ public:
 
     [[nodiscard]] std::vector<float> forward_token(std::uint32_t token_id,
                                                    std::uint64_t position);
+    // Greedy autoregressive generation from token IDs. The runner is reset
+    // before the prompt is consumed and retains the resulting decode state.
+    [[nodiscard]] std::vector<std::uint32_t> generate_tokens(
+        std::span<const std::uint32_t> prompt, std::size_t max_new_tokens,
+        Qwen35GenerationStats* stats = nullptr);
+    [[nodiscard]] std::string generate_text(std::string_view prompt,
+                                            std::size_t max_new_tokens,
+                                            Qwen35GenerationStats* stats = nullptr);
+    [[nodiscard]] std::string generate_chat(std::string_view user_message,
+                                            std::size_t max_new_tokens,
+                                            Qwen35GenerationStats* stats = nullptr);
     void reset();
     [[nodiscard]] const Qwen35Config& config() const noexcept;
     [[nodiscard]] std::size_t kv_cache_storage_bytes() const noexcept;

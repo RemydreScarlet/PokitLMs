@@ -149,8 +149,8 @@ struct QwenBpeTokenizer::Impl {
     explicit Impl(const GgufReader& model) {
         const auto pre = model.metadata().find("tokenizer.ggml.pre");
         const auto* pre_name = pre == model.metadata().end() ? nullptr : std::get_if<std::string>(&pre->second.value);
-        if (!pre_name || *pre_name != "qwen2") {
-            throw std::runtime_error("Qwen tokenizer requires tokenizer.ggml.pre=qwen2");
+        if (!pre_name || (*pre_name != "qwen2" && *pre_name != "qwen35")) {
+            throw std::runtime_error("Qwen tokenizer requires tokenizer.ggml.pre=qwen2 or qwen35");
         }
         const auto model_type = model.metadata().find("tokenizer.ggml.model");
         const auto* model_name = model_type == model.metadata().end() ? nullptr : std::get_if<std::string>(&model_type->second.value);

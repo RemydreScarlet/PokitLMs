@@ -30,7 +30,8 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - GGUF v3 metadata/tensor-directory reader with known-format payload extent validation; payloads remain file-backed.
 - Expert tensor splitting by the GGUF last dimension, ready to feed routed slices into the bounded store.
 - Validated GGUF architecture parameters and tensor index for Qwen3-MoE (`qwen3moe`); the token executor is still awaiting comparison with a reference model.
-- Qwen3.5 GGUF tensor index and single-token hybrid decoder for dense Qwen3.5 text models; recurrent convolution/DeltaNet state and bounded full-attention KV state are held separately and reported separately, with model matrices read from the GGUF file on demand.
+- Qwen3.5 GGUF tensor index and greedy text generation for dense Qwen3.5 models; prompt prefill skips vocabulary projection until its final token, recurrent convolution/DeltaNet state and bounded full-attention KV state are held and reported separately, and matrix weights stay file-backed.
+- `pokitlms-qwen35-bench MODEL.gguf USER_MESSAGE [new_tokens] [kv_window] [kv_precision]` runs a Qwen3.5 chat prompt and reports prefill/decode throughput plus attention and recurrent state memory.
 - Tied-output Qwen3-MoE GGUF support: when `output.weight` is absent, the runner reuses `token_embd.weight` for vocabulary projection.
 - Qwen3-MoE tensor-name/shape index for the model's base, attention, router, and expert tensors.
 - Qwen GPT-2 byte-level BPE encoder/decoder using GGUF vocabulary, merge, token-type, and special-token metadata.

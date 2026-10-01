@@ -58,4 +58,7 @@ endif()
 if(POKITLMS_BUILD_BENCHMARK)
     add_executable(pokitlms-bench tools/benchmark.cpp)
     target_link_libraries(pokitlms-bench PRIVATE PokitLMs::pokitlms)
+
+    add_executable(pokitlms-qwen35-bench tools/qwen35_benchmark.cpp)
+    target_link_libraries(pokitlms-qwen35-bench PRIVATE PokitLMs::pokitlms)
 endif()

@@ -1,5 +1,6 @@
 #include "pokitlms/model/qwen35_runner.hpp"
 
+#include "pokitlms/model/qwen_bpe_tokenizer.hpp"
 #include "pokitlms/model/tensor_linear.hpp"
 #include "pokitlms/model/tensor_reader.hpp"
 #include "pokitlms/ops/causal_conv1d.hpp"
@@ -9,6 +10,7 @@
 #include "simd_kernels.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -182,7 +184,7 @@ public:
     Impl(std::filesystem::path path, std::size_t requested_context,
          KvCachePrecision kv_precision)
         : model_path(std::move(path)), gguf(model_path),
-          file(std::make_shared<storage::ModelFile>(model_path)), index(gguf),
+          file(std::make_shared<storage::ModelFile>(model_path)), index(gguf), tokenizer(gguf),
           embedding_reader(file, index.token_embedding()), output_reader(file, index.output()),
           output_norm(load_vector(file, index.output_norm())) {
         const auto& config = index.config();
@@ -266,6 +268,7 @@ public:
     GgufReader gguf;
     std::shared_ptr<storage::ModelFile> file;
     Qwen35Index index;
+    QwenBpeTokenizer tokenizer;
     TensorReader embedding_reader;
     TensorReader output_reader;
     std::vector<float> output_norm;
@@ -278,7 +281,7 @@ public:
     ForwardScratch scratch;
 
     void forward_into(std::uint32_t token_id, std::uint64_t position,
-                      std::vector<float>& logits) {
+                      bool calculate_logits, std::vector<float>* logits) {
         const auto& config = index.config();
         if (token_id >= index.vocabulary_size()) throw std::out_of_range("token id exceeds model vocabulary");
         if (position != next_position || position >= model_context) {
@@ -410,9 +413,11 @@ public:
             }
 
             ++next_position;
+            if (!calculate_logits) return;
+            if (!logits) throw std::invalid_argument("Qwen3.5 logits output is required");
             rms_norm_zero_centered(scratch.hidden, output_norm, scratch.final_hidden, epsilon);
-            logits.resize(as_size(index.vocabulary_size(), "vocabulary_size"));
-            tensor_linear(output_reader, scratch.final_hidden, logits, 0, &scratch.linear);
+            logits->resize(as_size(index.vocabulary_size(), "vocabulary_size"));
+            tensor_linear(output_reader, scratch.final_hidden, *logits, 0, &scratch.linear);
         } catch (...) {
             reset();
             throw;
@@ -454,8 +459,75 @@ Qwen35Runner& Qwen35Runner::operator=(Qwen35Runner&&) noexcept = default;
 std::vector<float> Qwen35Runner::forward_token(std::uint32_t token_id, std::uint64_t position) {
     if (!impl_) throw std::logic_error("Qwen3.5 runner has been moved from");
     std::vector<float> logits;
-    impl_->forward_into(token_id, position, logits);
+    impl_->forward_into(token_id, position, true, &logits);
     return logits;
+}
+
+std::vector<std::uint32_t> Qwen35Runner::generate_tokens(
+    std::span<const std::uint32_t> prompt, std::size_t max_new_tokens,
+    Qwen35GenerationStats* stats) {
+    if (!impl_) throw std::logic_error("Qwen3.5 runner has been moved from");
+    if (stats) *stats = {};
+    impl_->reset();
+    if (max_new_tokens == 0) return {};
+    if (prompt.empty()) throw std::invalid_argument("Qwen3.5 generation prompt is empty");
+    if (prompt.size() > impl_->model_context ||
+        max_new_tokens > impl_->model_context - prompt.size()) {
+        throw std::invalid_argument("Qwen3.5 prompt and requested generation exceed model context");
+    }
+    if (stats) stats->prompt_tokens = prompt.size();
+
+    std::vector<float> logits;
+    const auto prefill_start = std::chrono::steady_clock::now();
+    for (std::size_t i = 0; i < prompt.size(); ++i) {
+        const bool last = i + 1 == prompt.size();
+        impl_->forward_into(prompt[i], i, last, last ? &logits : nullptr);
+    }
+    const auto prefill_end = std::chrono::steady_clock::now();
+    if (stats) {
+        stats->prefill_time_ns = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(prefill_end - prefill_start).count());
+    }
+
+    std::vector<std::uint32_t> generated;
+    generated.reserve(max_new_tokens);
+    auto decode_start = prefill_end;
+    for (std::size_t i = 0; i < max_new_tokens; ++i) {
+        const auto best = std::max_element(logits.begin(), logits.end());
+        if (best == logits.end()) throw std::runtime_error("Qwen3.5 produced no vocabulary logits");
+        const auto token = static_cast<std::uint32_t>(best - logits.begin());
+        generated.push_back(token);
+        if (stats) stats->generated_tokens = generated.size();
+        if (token == impl_->tokenizer.eos_token_id() || i + 1 == max_new_tokens) break;
+        impl_->forward_into(token, prompt.size() + i, true, &logits);
+    }
+    const auto decode_end = std::chrono::steady_clock::now();
+    if (stats) {
+        stats->decode_time_ns = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(decode_end - decode_start).count());
+    }
+    return generated;
+}
+
+std::string Qwen35Runner::generate_text(std::string_view prompt,
+                                       std::size_t max_new_tokens,
+                                       Qwen35GenerationStats* stats) {
+    if (!impl_) throw std::logic_error("Qwen3.5 runner has been moved from");
+    const std::string text(prompt);
+    const auto prompt_tokens = impl_->tokenizer.encode(text);
+    auto generated = generate_tokens(prompt_tokens, max_new_tokens, stats);
+    generated.erase(std::remove(generated.begin(), generated.end(), impl_->tokenizer.eos_token_id()),
+                    generated.end());
+    return impl_->tokenizer.decode(generated);
+}
+
+std::string Qwen35Runner::generate_chat(std::string_view user_message,
+                                       std::size_t max_new_tokens,
+                                       Qwen35GenerationStats* stats) {
+    std::string prompt = "<|im_start|>user\n";
+    prompt.append(user_message);
+    prompt += "<|im_end|>\n<|im_start|>assistant\n";
+    return generate_text(prompt, max_new_tokens, stats);
 }
 
 void Qwen35Runner::reset() { if (impl_) impl_->reset(); }
