@@ -354,20 +354,18 @@ void dequantize_quantized_row(std::uint32_t type,
             encoded.size() != output.size() / block_elements * block_bytes) {
             throw std::invalid_argument("invalid Q4_0/Q8_0 row dimensions");
         }
+        std::array<std::int8_t, block_elements> decoded{};
         for (std::size_t block = 0; block < output.size() / block_elements; ++block) {
             const auto* data = encoded.data() + block * block_bytes;
             const float scale = half_to_float(read_u16(data));
+            auto* row = output.data() + block * block_elements;
             if (type == 2) {
-                for (std::size_t i = 0; i < 16; ++i) {
-                    const auto packed = std::to_integer<std::uint8_t>(data[2 + i]);
-                    output[block * 32 + i] = scale * (static_cast<int>(packed & 0x0fU) - 8);
-                    output[block * 32 + i + 16] = scale * (static_cast<int>(packed >> 4) - 8);
-                }
+                detail::unpack_q4_0(reinterpret_cast<const std::uint8_t*>(data + 2),
+                                    decoded.data());
+                detail::scale_i8_f32(row, decoded.data(), scale, block_elements);
             } else {
-                for (std::size_t i = 0; i < 32; ++i) {
-                    const auto q = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(data[2 + i]));
-                    output[block * 32 + i] = scale * static_cast<float>(q);
-                }
+                detail::scale_i8_f32(row,
+                    reinterpret_cast<const std::int8_t*>(data + 2), scale, block_elements);
             }
         }
         return;
