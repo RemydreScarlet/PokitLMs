@@ -190,68 +190,95 @@ void KvCache::attend(const float* query, std::size_t query_count, float* output,
     if (!std::isfinite(scale) || scale <= 0.0F) throw std::invalid_argument("attention scale must be positive");
 
     const auto group_size = query_heads / kv_heads_;
-    for (std::size_t head = 0; head < query_heads; ++head) {
-        const auto kv_head = head / group_size;
-        const auto* q = query + head * key_dimension_;
-        float max_score = -std::numeric_limits<float>::infinity();
+    if (group_size > score_group_capacity_) {
+        scores_.resize(checked_product(capacity_, group_size));
+        attention_max_scratch_.resize(group_size);
+        attention_sum_scratch_.resize(group_size);
+        score_group_capacity_ = group_size;
+    }
+    for (std::size_t kv_head = 0; kv_head < kv_heads_; ++kv_head) {
+        std::fill_n(attention_max_scratch_.data(), group_size,
+                    -std::numeric_limits<float>::infinity());
         for (std::size_t index = 0; index < size_; ++index) {
             const auto position = first_position_ + index;
             const auto slot = static_cast<std::size_t>(position % capacity_);
             const auto key_offset = slot * key_size + kv_head * key_dimension_;
-            float score = 0.0F;
-            if (precision_ == KvCachePrecision::Q8_0) {
-                const auto scale_base = slot * kv_heads_ * key_blocks_per_head_ +
-                                        kv_head * key_blocks_per_head_;
-                for (std::size_t block = 0; block < key_blocks_per_head_; ++block) {
-                    const auto scale = half_to_float(keys_q8_scales_[scale_base + block]);
-                    score += scale * detail::dot_i8_f32(
-                        q + block * 32, keys_q8_.data() + key_offset + block * 32, 32);
+            if (precision_ == KvCachePrecision::Float16) {
+                for (std::size_t d = 0; d < key_dimension_; ++d) {
+                    decoded_key_scratch_[d] = half_to_float(keys_f16_[key_offset + d]);
                 }
-            } else {
-                const float* key = nullptr;
-                if (precision_ == KvCachePrecision::Float16) {
-                    for (std::size_t d = 0; d < key_dimension_; ++d) {
-                        decoded_key_scratch_[d] = half_to_float(keys_f16_[key_offset + d]);
-                    }
-                    key = decoded_key_scratch_.data();
-                } else key = keys_.data() + key_offset;
-                score = detail::dot_f32(q, key, key_dimension_);
             }
-            score *= scale;
-            scores_[index] = score;
-            max_score = std::max(max_score, score);
+            for (std::size_t local_head = 0; local_head < group_size; ++local_head) {
+                const auto head = kv_head * group_size + local_head;
+                const auto* q = query + head * key_dimension_;
+                float score = 0.0F;
+                if (precision_ == KvCachePrecision::Q8_0) {
+                    const auto scale_base = slot * kv_heads_ * key_blocks_per_head_ +
+                                            kv_head * key_blocks_per_head_;
+                    for (std::size_t block = 0; block < key_blocks_per_head_; ++block) {
+                        const auto block_scale = half_to_float(keys_q8_scales_[scale_base + block]);
+                        score += block_scale * detail::dot_i8_f32(
+                            q + block * 32, keys_q8_.data() + key_offset + block * 32, 32);
+                    }
+                } else {
+                    const float* key = precision_ == KvCachePrecision::Float16
+                        ? decoded_key_scratch_.data() : keys_.data() + key_offset;
+                    score = detail::dot_f32(q, key, key_dimension_);
+                }
+                score *= scale;
+                scores_[local_head * capacity_ + index] = score;
+                attention_max_scratch_[local_head] =
+                    std::max(attention_max_scratch_[local_head], score);
+            }
         }
 
-        float denominator = 0.0F;
-        for (std::size_t index = 0; index < size_; ++index) {
-            scores_[index] = std::exp(scores_[index] - max_score);
-            denominator += scores_[index];
+        for (std::size_t local_head = 0; local_head < group_size; ++local_head) {
+            const auto score_offset = local_head * capacity_;
+            float denominator = 0.0F;
+            for (std::size_t index = 0; index < size_; ++index) {
+                auto& score = scores_[score_offset + index];
+                score = std::exp(score - attention_max_scratch_[local_head]);
+                denominator += score;
+            }
+            attention_sum_scratch_[local_head] = denominator;
+            auto* out = output + (kv_head * group_size + local_head) * value_dimension_;
+            std::fill_n(out, value_dimension_, 0.0F);
         }
-        auto* out = output + head * value_dimension_;
-        std::fill_n(out, value_dimension_, 0.0F);
+
         for (std::size_t index = 0; index < size_; ++index) {
             const auto position = first_position_ + index;
             const auto slot = static_cast<std::size_t>(position % capacity_);
             const auto value_offset = slot * value_size + kv_head * value_dimension_;
-            const float probability = scores_[index] / denominator;
+            if (precision_ == KvCachePrecision::Float16) {
+                for (std::size_t d = 0; d < value_dimension_; ++d) {
+                    decoded_value_scratch_[d] = half_to_float(values_f16_[value_offset + d]);
+                }
+            }
             if (precision_ == KvCachePrecision::Q8_0) {
                 const auto scale_base = slot * kv_heads_ * value_blocks_per_head_ +
                                         kv_head * value_blocks_per_head_;
                 for (std::size_t block = 0; block < value_blocks_per_head_; ++block) {
                     const auto value_scale = half_to_float(values_q8_scales_[scale_base + block]);
-                    detail::scale_add_i8_f32(out + block * 32,
-                        values_q8_.data() + value_offset + block * 32,
-                        probability * value_scale, 32);
+                    const auto* value = values_q8_.data() + value_offset + block * 32;
+                    for (std::size_t local_head = 0; local_head < group_size; ++local_head) {
+                        const auto head = kv_head * group_size + local_head;
+                        const float probability = scores_[local_head * capacity_ + index] /
+                                                  attention_sum_scratch_[local_head];
+                        auto* out = output + head * value_dimension_ + block * 32;
+                        detail::scale_add_i8_f32(out, value,
+                                                  probability * value_scale, 32);
+                    }
                 }
             } else {
-                const float* value = nullptr;
-                if (precision_ == KvCachePrecision::Float16) {
-                    for (std::size_t d = 0; d < value_dimension_; ++d) {
-                        decoded_value_scratch_[d] = half_to_float(values_f16_[value_offset + d]);
-                    }
-                    value = decoded_value_scratch_.data();
-                } else value = values_.data() + value_offset;
-                detail::scale_add_f32(out, value, probability, value_dimension_);
+                const float* value = precision_ == KvCachePrecision::Float16
+                    ? decoded_value_scratch_.data() : values_.data() + value_offset;
+                for (std::size_t local_head = 0; local_head < group_size; ++local_head) {
+                    const auto head = kv_head * group_size + local_head;
+                    const float probability = scores_[local_head * capacity_ + index] /
+                                              attention_sum_scratch_[local_head];
+                    auto* out = output + head * value_dimension_;
+                    detail::scale_add_f32(out, value, probability, value_dimension_);
+                }
             }
         }
     }
@@ -267,7 +294,8 @@ std::size_t KvCache::storage_bytes() const noexcept {
             values_q8_scales_.size()) * sizeof(std::uint16_t) +
            (keys_q8_.size() + values_q8_.size()) * sizeof(std::int8_t) +
            (decoded_key_scratch_.size() + decoded_value_scratch_.size()) * sizeof(float) +
-           scores_.size() * sizeof(float);
+           (scores_.size() + attention_max_scratch_.size() +
+            attention_sum_scratch_.size()) * sizeof(float);
 }
 void KvCache::clear() noexcept {
     size_ = 0;

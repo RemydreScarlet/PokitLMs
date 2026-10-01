@@ -52,6 +52,9 @@ private:
     std::vector<std::uint16_t> values_q8_scales_;
     std::vector<float> decoded_key_scratch_;
     std::vector<float> decoded_value_scratch_;
+    std::vector<float> attention_max_scratch_;
+    std::vector<float> attention_sum_scratch_;
+    std::size_t score_group_capacity_{};
     std::size_t key_blocks_per_head_{};
     std::size_t value_blocks_per_head_{};
     std::vector<float> scores_;
