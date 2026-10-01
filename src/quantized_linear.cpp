@@ -1,4 +1,5 @@
 #include "pokitlms/ops/quantized_linear.hpp"
+#include "simd_kernels.hpp"
 
 #include <bit>
 #include <array>
@@ -255,7 +256,7 @@ void linear_k(std::span<const float> input, std::span<const std::byte> weights,
             const auto* encoded = weights.data() + (row * blocks_per_row + block) * BlockBytes;
             decode(encoded, decoded);
             const auto offset = block * BlockElements;
-            for (std::size_t i = 0; i < BlockElements; ++i) sum += decoded[i] * input[offset + i];
+            sum += detail::dot_f32(decoded.data(), input.data() + offset, BlockElements);
         }
         output[row] = sum;
     }
@@ -287,18 +288,19 @@ void linear_quantized(std::span<const float> input,
             const auto* quant = encoded + 2;
             const auto input_offset = block * kBlockElements;
             if constexpr (Q4) {
+                std::array<std::int8_t, kBlockElements> decoded{};
                 for (std::size_t i = 0; i < 16; ++i) {
                     const auto packed = std::to_integer<std::uint8_t>(quant[i]);
-                    const int q0 = static_cast<int>(packed & 0x0fU) - 8;
-                    const int q1 = static_cast<int>(packed >> 4) - 8;
-                    sum += scale * static_cast<float>(q0) * input[input_offset + i];
-                    sum += scale * static_cast<float>(q1) * input[input_offset + i + 16];
+                    decoded[i] = static_cast<std::int8_t>(static_cast<int>(packed & 0x0fU) - 8);
+                    decoded[i + 16] = static_cast<std::int8_t>(static_cast<int>(packed >> 4) - 8);
                 }
+                sum += scale * detail::dot_i8_f32(input.data() + input_offset, decoded.data(), kBlockElements);
             } else {
+                std::array<std::int8_t, kBlockElements> decoded{};
                 for (std::size_t i = 0; i < kBlockElements; ++i) {
-                    const auto q = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(quant[i]));
-                    sum += scale * static_cast<float>(q) * input[input_offset + i];
+                    decoded[i] = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(quant[i]));
                 }
+                sum += scale * detail::dot_i8_f32(input.data() + input_offset, decoded.data(), kBlockElements);
             }
         }
         output[row] = sum;

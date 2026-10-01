@@ -21,6 +21,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - File-backed expert slice reader with an LRU cache, disk-read accounting, and concurrent positioned reads on POSIX.
 - Shared random-access model file and GGUF tensor row reader; F32/F16/BF16 rows can be converted without loading a full tensor.
 - Disk-backed GGUF matrix-vector dispatch in bounded row batches for F32/F16/BF16, Q2_K, Q3_K, Q4_0, Q4_K, Q5_K, Q6_K, and Q8_0.
+- AArch64 NEON dot-product path for dense F32, Q4_0/Q8_0, and decoded K-quant blocks; scalar fallback remains portable.
 - Single-token Qwen3-MoE decode path with per-layer GQA KV state, Q/K RMSNorm, RoPE, top-k routing, and cached on-demand expert execution.
 - Tokenizer-backed multi-token generation with greedy or temperature sampling, top-k/top-p filtering, repetition penalty, and EOS stopping.
 - GGUF v3 metadata/tensor-directory reader with known-format payload extent validation; payloads remain file-backed.
@@ -48,7 +49,7 @@ ctest --test-dir build --output-on-failure
 
 ## Near-term backend work
 
-1. Compare tokenizer, Qwen3-MoE decode, and each scalar quantized format against reference outputs.
+1. Cross-build and compare tokenizer, Qwen3-MoE decode, and each quantized format against reference outputs.
 2. Add model-specific prompt templates and tied-output model support.
 3. Expand tensor-format coverage for common GGUF quantizations.
 4. Add async storage reads and compute/I/O overlap after the synchronous path is validated.

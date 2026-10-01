@@ -1,4 +1,5 @@
 #include "pokitlms/ops/linear.hpp"
+#include "simd_kernels.hpp"
 
 #include <limits>
 #include <stdexcept>
@@ -22,12 +23,9 @@ void linear(
     }
 
     for (std::size_t row = 0; row < output.size(); ++row) {
-        float sum = bias.empty() ? 0.0F : bias[row];
         const auto row_offset = row * input.size();
-        for (std::size_t column = 0; column < input.size(); ++column) {
-            sum += weight[row_offset + column] * input[column];
-        }
-        output[row] = sum;
+        output[row] = (bias.empty() ? 0.0F : bias[row]) +
+            detail::dot_f32(weight.data() + row_offset, input.data(), input.size());
     }
 }
 

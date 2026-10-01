@@ -1,0 +1,50 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+#include <arm_neon.h>
+#endif
+
+namespace pokitlms::detail {
+
+inline float dot_f32(const float* lhs, const float* rhs, std::size_t count) noexcept {
+    std::size_t i = 0;
+    float sum = 0.0F;
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    float32x4_t accumulator = vdupq_n_f32(0.0F);
+    for (; i + 4 <= count; i += 4) {
+        accumulator = vfmaq_f32(accumulator, vld1q_f32(lhs + i), vld1q_f32(rhs + i));
+    }
+    sum = vaddvq_f32(accumulator);
+#endif
+    for (; i < count; ++i) sum += lhs[i] * rhs[i];
+    return sum;
+}
+
+inline float dot_i8_f32(const float* lhs, const std::int8_t* quantized,
+                        std::size_t count) noexcept {
+    std::size_t i = 0;
+    float sum = 0.0F;
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    float32x4_t accumulator = vdupq_n_f32(0.0F);
+    for (; i + 16 <= count; i += 16) {
+        const int8x16_t q8 = vld1q_s8(quantized + i);
+        const int16x8_t q16lo = vmovl_s8(vget_low_s8(q8));
+        const int16x8_t q16hi = vmovl_s8(vget_high_s8(q8));
+        const int32x4_t q32[4] = {
+            vmovl_s16(vget_low_s16(q16lo)), vmovl_s16(vget_high_s16(q16lo)),
+            vmovl_s16(vget_low_s16(q16hi)), vmovl_s16(vget_high_s16(q16hi))};
+        for (std::size_t group = 0; group < 4; ++group) {
+            accumulator = vfmaq_f32(accumulator,
+                vcvtq_f32_s32(q32[group]), vld1q_f32(lhs + i + group * 4));
+        }
+    }
+    sum = vaddvq_f32(accumulator);
+#endif
+    for (; i < count; ++i) sum += static_cast<float>(quantized[i]) * lhs[i];
+    return sum;
+}
+
+}  // namespace pokitlms::detail
