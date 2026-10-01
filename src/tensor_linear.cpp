@@ -54,19 +54,21 @@ void tensor_linear(const TensorReader& weights, std::span<const float> input,
             throw std::length_error("GGUF matrix batch byte size overflows");
         }
         const auto encoded_bytes = weights.row_bytes() * rows;
-        buffers.encoded.resize(encoded_bytes);
         if (floating) {
             if (feature_count > std::numeric_limits<std::size_t>::max() / rows) {
                 throw std::length_error("GGUF matrix batch dimensions overflow");
             }
             const auto value_count = feature_count * rows;
             buffers.floating.resize(value_count);
+            if (tensor.type != 0) buffers.encoded.resize(encoded_bytes);
             weights.read_float_rows_into(first, rows,
                 std::span<float>(buffers.floating.data(), value_count),
-                std::span<std::byte>(buffers.encoded.data(), encoded_bytes));
+                tensor.type == 0 ? std::span<std::byte>{}
+                                 : std::span<std::byte>(buffers.encoded.data(), encoded_bytes));
             const std::span<const float> values(buffers.floating.data(), value_count);
             linear(input, values, {}, destination);
         } else {
+            buffers.encoded.resize(encoded_bytes);
             if (feature_count > std::numeric_limits<std::size_t>::max() / rows) {
                 throw std::length_error("GGUF matrix batch dimensions overflow");
             }

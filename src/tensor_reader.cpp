@@ -174,6 +174,11 @@ void TensorReader::read_float_rows_into(std::uint64_t first_row, std::size_t row
     if (values.size() != static_cast<std::size_t>(elements_per_row) * rows) {
         throw std::invalid_argument("float tensor destination has the wrong size");
     }
+    if (tensor_.type == 0 && std::endian::native == std::endian::little &&
+        sizeof(float) == sizeof(std::uint32_t) && std::numeric_limits<float>::is_iec559) {
+        read_rows_into(first_row, rows, std::as_writable_bytes(values));
+        return;
+    }
     read_rows_into(first_row, rows, encoded);
     if (tensor_.type == 0) {
         for (std::size_t i = 0; i < values.size(); ++i) values[i] = std::bit_cast<float>(read_u32(encoded.data() + i * 4));
