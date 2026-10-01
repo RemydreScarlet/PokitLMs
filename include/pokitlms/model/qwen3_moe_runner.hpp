@@ -8,9 +8,20 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace pokitlms::model {
+
+struct GenerationOptions {
+    float temperature{};                 // 0 selects greedy decoding.
+    std::size_t top_k{};                 // 0 keeps the full vocabulary.
+    float top_p{1.0F};                   // Nucleus threshold in (0, 1].
+    float repetition_penalty{1.0F};      // 1 disables the penalty.
+    std::uint64_t seed{};
+};
 
 // Single-sequence Qwen3-MoE decoder. The model tensors remain file-backed;
 // only KV state, small norm vectors, and the selected experts are resident.
@@ -28,6 +39,16 @@ public:
     // Consumes one token at its absolute sequence position and returns logits.
     [[nodiscard]] std::vector<float> forward_token(std::uint32_t token_id,
                                                    std::uint64_t position);
+    // Consumes a tokenized prompt, resets existing KV state, and returns generated IDs.
+    // The EOS token is included when generated.
+    [[nodiscard]] std::vector<std::uint32_t> generate_tokens(
+        std::span<const std::uint32_t> prompt, std::size_t max_new_tokens,
+        const GenerationOptions& options = {});
+    // Tokenizes a raw prompt and decodes generated IDs. Add any desired model chat
+    // template markers to prompt before calling; this method does not infer a template.
+    [[nodiscard]] std::string generate_text(
+        std::string_view prompt, std::size_t max_new_tokens,
+        const GenerationOptions& options = {});
     void reset();
     [[nodiscard]] const TransformerConfig& config() const noexcept;
     [[nodiscard]] std::uint64_t bytes_read_from_disk() const noexcept;

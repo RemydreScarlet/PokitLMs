@@ -1,5 +1,6 @@
 #include "pokitlms/model/qwen3_moe_runner.hpp"
 
+#include "pokitlms/model/qwen_bpe_tokenizer.hpp"
 #include "pokitlms/model/tensor_linear.hpp"
 #include "pokitlms/model/tensor_reader.hpp"
 #include "pokitlms/ops/kv_cache.hpp"
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -106,13 +108,86 @@ std::vector<Route> route_experts(std::span<const float> logits, std::size_t top_
     return routes;
 }
 
+std::uint32_t sample_token(std::span<const float> logits,
+                           std::span<const std::uint32_t> history,
+                           const GenerationOptions& options,
+                           std::mt19937_64& random) {
+    if (!std::isfinite(options.temperature) || options.temperature < 0.0F ||
+        !std::isfinite(options.top_p) || options.top_p <= 0.0F || options.top_p > 1.0F ||
+        !std::isfinite(options.repetition_penalty) || options.repetition_penalty <= 0.0F) {
+        throw std::invalid_argument("invalid generation sampling options");
+    }
+    if (logits.empty() || logits.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("invalid logits vocabulary size");
+    }
+    std::vector<float> adjusted(logits.begin(), logits.end());
+    for (const float logit : adjusted) {
+        if (!std::isfinite(logit)) throw std::runtime_error("model produced non-finite logits");
+    }
+    if (options.repetition_penalty != 1.0F) {
+        std::vector<bool> seen(adjusted.size(), false);
+        for (const auto id : history) {
+            if (id >= adjusted.size()) continue;
+            if (seen[id]) continue;
+            seen[id] = true;
+            adjusted[id] = adjusted[id] < 0.0F
+                ? adjusted[id] * options.repetition_penalty
+                : adjusted[id] / options.repetition_penalty;
+        }
+    }
+    if (options.temperature == 0.0F) {
+        return static_cast<std::uint32_t>(std::distance(adjusted.begin(),
+            std::max_element(adjusted.begin(), adjusted.end())));
+    }
+
+    const double inverse_temperature = 1.0 / static_cast<double>(options.temperature);
+    std::vector<std::pair<double, std::uint32_t>> ranked;
+    ranked.reserve(adjusted.size());
+    for (std::size_t id = 0; id < adjusted.size(); ++id) {
+        ranked.emplace_back(static_cast<double>(adjusted[id]) * inverse_temperature,
+                            static_cast<std::uint32_t>(id));
+    }
+    const auto order = [](const auto& lhs, const auto& rhs) {
+        return lhs.first > rhs.first || (lhs.first == rhs.first && lhs.second < rhs.second);
+    };
+    if (options.top_k != 0 && options.top_k < ranked.size()) {
+        std::partial_sort(ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(options.top_k),
+                          ranked.end(), order);
+        ranked.resize(options.top_k);
+    }
+    if (options.top_p < 1.0F) std::sort(ranked.begin(), ranked.end(), order);
+
+    double max_logit = -std::numeric_limits<double>::infinity();
+    for (const auto& item : ranked) max_logit = std::max(max_logit, item.first);
+    std::vector<double> weights;
+    weights.reserve(ranked.size());
+    double total = 0.0;
+    for (const auto& item : ranked) {
+        const auto weight = std::exp(static_cast<double>(item.first - max_logit));
+        weights.push_back(weight);
+        total += weight;
+    }
+    if (options.top_p < 1.0F) {
+        std::size_t keep = 0;
+        double cumulative = 0.0;
+        do {
+            cumulative += weights[keep] / total;
+            ++keep;
+        } while (keep < weights.size() && cumulative < options.top_p);
+        ranked.resize(keep);
+        weights.resize(keep);
+    }
+    std::discrete_distribution<std::size_t> distribution(weights.begin(), weights.end());
+    return ranked[distribution(random)].second;
+}
+
 }  // namespace
 
 class Qwen3MoeRunner::Impl {
 public:
     Impl(std::filesystem::path path, std::size_t cache_budget, std::size_t requested_context)
         : model_path(std::move(path)), gguf(model_path),
-          file(std::make_shared<storage::ModelFile>(model_path)), index(gguf) {
+          file(std::make_shared<storage::ModelFile>(model_path)), index(gguf), tokenizer(gguf) {
         const auto& config = index.config();
         const auto model_context = as_size(config.context_length, "context_length");
         // Full advertised contexts require multiple gigabytes of FP32 KV state on MoE models.
@@ -159,6 +234,7 @@ public:
     GgufReader gguf;
     std::shared_ptr<storage::ModelFile> file;
     Qwen3MoeIndex index;
+    QwenBpeTokenizer tokenizer;
     std::size_t context_capacity{};
     std::uint64_t next_position{};
     std::vector<float> output_norm;
@@ -275,6 +351,38 @@ public:
         for (auto& cache : kv_caches) cache.clear();
         next_position = 0;
     }
+
+    std::vector<std::uint32_t> generate(std::span<const std::uint32_t> prompt,
+                                        std::size_t max_new_tokens,
+                                        const GenerationOptions& options) {
+        reset();
+        if (prompt.empty()) throw std::invalid_argument("generation prompt must contain at least one token");
+        if (prompt.size() > context_capacity || max_new_tokens > context_capacity - prompt.size()) {
+            throw std::length_error("prompt and generation length exceed KV context capacity");
+        }
+        std::vector<std::uint32_t> history(prompt.begin(), prompt.end());
+        std::vector<std::uint32_t> generated;
+        if (max_new_tokens == 0) return generated;
+        std::vector<float> logits;
+        try {
+            for (std::size_t i = 0; i < prompt.size(); ++i) {
+                logits = forward(prompt[i], i);
+            }
+            std::mt19937_64 random(options.seed);
+            generated.reserve(max_new_tokens);
+            for (std::size_t i = 0; i < max_new_tokens; ++i) {
+                const auto token = sample_token(logits, history, options, random);
+                generated.push_back(token);
+                history.push_back(token);
+                if (token == tokenizer.eos_token_id()) break;
+                if (i + 1 < max_new_tokens) logits = forward(token, prompt.size() + i);
+            }
+        } catch (...) {
+            reset();
+            throw;
+        }
+        return generated;
+    }
 };
 
 Qwen3MoeRunner::Qwen3MoeRunner(std::filesystem::path model_path,
@@ -291,6 +399,25 @@ Qwen3MoeRunner& Qwen3MoeRunner::operator=(Qwen3MoeRunner&&) noexcept = default;
 std::vector<float> Qwen3MoeRunner::forward_token(std::uint32_t token_id, std::uint64_t position) {
     if (!impl_) throw std::logic_error("Qwen3-MoE runner has been moved from");
     return impl_->forward(token_id, position);
+}
+std::vector<std::uint32_t> Qwen3MoeRunner::generate_tokens(
+    std::span<const std::uint32_t> prompt, std::size_t max_new_tokens,
+    const GenerationOptions& options) {
+    if (!impl_) throw std::logic_error("Qwen3-MoE runner has been moved from");
+    return impl_->generate(prompt, max_new_tokens, options);
+}
+std::string Qwen3MoeRunner::generate_text(std::string_view prompt, std::size_t max_new_tokens,
+                                          const GenerationOptions& options) {
+    if (!impl_) throw std::logic_error("Qwen3-MoE runner has been moved from");
+    auto prompt_tokens = impl_->tokenizer.encode(std::string(prompt));
+    const auto generated = impl_->generate(prompt_tokens, max_new_tokens, options);
+    std::vector<std::uint32_t> printable;
+    printable.reserve(generated.size());
+    for (const auto token : generated) {
+        if (token == impl_->tokenizer.eos_token_id()) break;
+        printable.push_back(token);
+    }
+    return impl_->tokenizer.decode(printable);
 }
 void Qwen3MoeRunner::reset() { if (impl_) impl_->reset(); }
 const TransformerConfig& Qwen3MoeRunner::config() const noexcept {
