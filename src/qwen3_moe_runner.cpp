@@ -334,11 +334,23 @@ std::uint32_t sample_token(std::span<const float> logits,
 
 class Qwen3MoeRunner::Impl {
 public:
+    struct DenseBlockReaders {
+        DenseBlockReaders(const std::shared_ptr<storage::ModelFile>& file,
+                          const Qwen3MoeBlockTensors& block)
+            : query(file, block.query), key(file, block.key), value(file, block.value),
+              attention_output(file, block.attention_output), router(file, block.router) {}
+        TensorReader query;
+        TensorReader key;
+        TensorReader value;
+        TensorReader attention_output;
+        TensorReader router;
+    };
+
     Impl(std::filesystem::path path, std::size_t cache_budget, std::size_t requested_context,
-        KvCachePrecision kv_precision)
+         KvCachePrecision kv_precision)
         : model_path(std::move(path)), gguf(model_path),
           file(std::make_shared<storage::ModelFile>(model_path)), index(gguf), tokenizer(gguf),
-          embedding_reader(file, index.token_embedding()) {
+          embedding_reader(file, index.token_embedding()), output_reader(file, index.output()) {
         const auto& config = index.config();
         model_context = as_size(config.context_length, "context_length");
         // Keep KV residency bounded for mobile devices. The ring retains the most
@@ -395,6 +407,7 @@ public:
         key_norms.reserve(layer_count);
         feed_forward_norms.reserve(layer_count);
         kv_caches.reserve(layer_count);
+        block_readers.reserve(layer_count);
         gate_stores.reserve(layer_count);
         up_stores.reserve(layer_count);
         down_stores.reserve(layer_count);
@@ -406,6 +419,7 @@ public:
             feed_forward_norms.push_back(load_vector(file, block.feed_forward_norm));
             kv_caches.emplace_back(context_capacity, kv_heads, key_dim, value_dim,
                                    kv_precision);
+            block_readers.emplace_back(file, block);
             gate_stores.push_back(std::make_unique<storage::ExpertStore>(
                 file, expert_slices[layer][0], cache_capacities[layer * 3]));
             up_stores.push_back(std::make_unique<storage::ExpertStore>(
@@ -423,6 +437,7 @@ public:
     Qwen3MoeIndex index;
     QwenBpeTokenizer tokenizer;
     TensorReader embedding_reader;
+    TensorReader output_reader;
     std::size_t model_context{};
     std::size_t context_capacity{};
     std::uint64_t next_position{};
@@ -432,6 +447,7 @@ public:
     std::vector<std::vector<float>> key_norms;
     std::vector<std::vector<float>> feed_forward_norms;
     std::vector<KvCache> kv_caches;
+    std::vector<DenseBlockReaders> block_readers;
     std::vector<std::array<std::vector<storage::ExpertSlice>, 3>> expert_slices;
     std::vector<std::unique_ptr<storage::ExpertStore>> gate_stores;
     std::vector<std::unique_ptr<storage::ExpertStore>> up_stores;
@@ -452,6 +468,7 @@ public:
         std::vector<float> activated;
         std::vector<float> expert_output;
         std::vector<float> final_hidden;
+        TensorLinearScratch tensor_linear;
     } scratch;
     struct AssistantTokenSequence {
         std::size_t message_index{};
@@ -490,14 +507,15 @@ public:
             const auto theta = static_cast<float>(config.rope_frequency_base);
             for (std::size_t layer = 0; layer < index.blocks().size(); ++layer) {
                 const auto& block = index.blocks()[layer];
+                const auto& readers = block_readers[layer];
                 auto& normalized = scratch.normalized;
                 rms_norm(hidden, attention_norms[layer], normalized, epsilon);
                 auto& query = scratch.query;
                 auto& key = scratch.key;
                 auto& value = scratch.value;
-                tensor_linear(TensorReader(file, block.query), normalized, query);
-                tensor_linear(TensorReader(file, block.key), normalized, key);
-                tensor_linear(TensorReader(file, block.value), normalized, value);
+                tensor_linear(readers.query, normalized, query, 0, &scratch.tensor_linear);
+                tensor_linear(readers.key, normalized, key, 0, &scratch.tensor_linear);
+                tensor_linear(readers.value, normalized, value, 0, &scratch.tensor_linear);
                 for (std::size_t head = 0; head < query_heads; ++head) {
                     auto* begin = query.data() + head * key_dim;
                     rms_norm(std::span<const float>(begin, key_dim), query_norms[layer],
@@ -514,12 +532,14 @@ public:
                 auto& attended = scratch.attended;
                 kv_caches[layer].attend(query.data(), query.size(), attended.data(), attended.size());
                 auto& attention_output = scratch.attention_output;
-                tensor_linear(TensorReader(file, block.attention_output), attended, attention_output);
+                tensor_linear(readers.attention_output, attended, attention_output,
+                              0, &scratch.tensor_linear);
                 for (std::size_t i = 0; i < hidden_size; ++i) hidden[i] += attention_output[i];
 
                 rms_norm(hidden, feed_forward_norms[layer], normalized, epsilon);
                 auto& router_logits = scratch.router_logits;
-                tensor_linear(TensorReader(file, block.router), normalized, router_logits);
+                tensor_linear(readers.router, normalized, router_logits,
+                              0, &scratch.tensor_linear);
                 const auto routes = route_experts(router_logits,
                     as_size(config.experts_per_token, "experts_per_token"), config.expert_weights_norm);
                 auto& moe_result = scratch.moe_result;
@@ -554,13 +574,14 @@ public:
                     auto& gate = scratch.gate;
                     auto& up = scratch.up;
                     auto& activated = scratch.activated;
-                    tensor_linear(gate_reader, normalized, gate);
-                    tensor_linear(up_reader, normalized, up);
+                    tensor_linear(gate_reader, normalized, gate, 0, &scratch.tensor_linear);
+                    tensor_linear(up_reader, normalized, up, 0, &scratch.tensor_linear);
                     for (std::size_t i = 0; i < activated.size(); ++i) {
                         activated[i] = (gate[i] / (1.0F + std::exp(-gate[i]))) * up[i];
                     }
                     auto& expert_output = scratch.expert_output;
-                    tensor_linear(down_reader, activated, expert_output);
+                    tensor_linear(down_reader, activated, expert_output,
+                                  0, &scratch.tensor_linear);
                     for (std::size_t i = 0; i < hidden_size; ++i) {
                         moe_result[i] += route.probability * expert_output[i];
                     }
@@ -572,7 +593,7 @@ public:
             auto& final_hidden = scratch.final_hidden;
             rms_norm(hidden, output_norm, final_hidden, epsilon);
             std::vector<float> logits(as_size(index.vocabulary_size(), "vocabulary_size"));
-            tensor_linear(TensorReader(file, index.output()), final_hidden, logits);
+            tensor_linear(output_reader, final_hidden, logits, 0, &scratch.tensor_linear);
             return logits;
         } catch (...) {
             reset();

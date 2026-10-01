@@ -11,7 +11,8 @@
 namespace pokitlms::model {
 
 void tensor_linear(const TensorReader& weights, std::span<const float> input,
-                   std::span<float> output, std::size_t row_batch) {
+                   std::span<float> output, std::size_t row_batch,
+                   TensorLinearScratch* scratch) {
     const auto& tensor = weights.tensor();
     if (tensor.dimensions.empty() || input.empty() || output.empty() ||
         tensor.dimensions.front() != input.size() || weights.row_count() != output.size()) {
@@ -44,17 +45,34 @@ void tensor_linear(const TensorReader& weights, std::span<const float> input,
         row_batch = std::max<std::size_t>(1, target_working_set_bytes / working_set_row_bytes);
     }
     const auto chunk_limit = std::min(row_batch, output.size());
+    TensorLinearScratch local_scratch;
+    auto& buffers = scratch ? *scratch : local_scratch;
     for (std::size_t first = 0; first < output.size();) {
         const auto rows = std::min(chunk_limit, output.size() - first);
         auto destination = output.subspan(first, rows);
+        if (weights.row_bytes() > std::numeric_limits<std::size_t>::max() / rows) {
+            throw std::length_error("GGUF matrix batch byte size overflows");
+        }
+        const auto encoded_bytes = weights.row_bytes() * rows;
+        buffers.encoded.resize(encoded_bytes);
         if (floating) {
-            const auto values = weights.read_float_rows(first, rows);
+            if (feature_count > std::numeric_limits<std::size_t>::max() / rows) {
+                throw std::length_error("GGUF matrix batch dimensions overflow");
+            }
+            const auto value_count = feature_count * rows;
+            buffers.floating.resize(value_count);
+            weights.read_float_rows_into(first, rows,
+                std::span<float>(buffers.floating.data(), value_count),
+                std::span<std::byte>(buffers.encoded.data(), encoded_bytes));
+            const std::span<const float> values(buffers.floating.data(), value_count);
             linear(input, values, {}, destination);
         } else {
             if (feature_count > std::numeric_limits<std::size_t>::max() / rows) {
                 throw std::length_error("GGUF matrix batch dimensions overflow");
             }
-            const auto encoded = weights.read_rows(first, rows);
+            weights.read_rows_into(first, rows,
+                std::span<std::byte>(buffers.encoded.data(), encoded_bytes));
+            const std::span<const std::byte> encoded(buffers.encoded.data(), encoded_bytes);
             switch (tensor.type) {
                 case 2: linear_q4_0(input, encoded, rows, {}, destination); break;
                 case 3: linear_q4_1(input, encoded, rows, {}, destination); break;
