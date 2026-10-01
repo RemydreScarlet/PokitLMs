@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -21,6 +22,7 @@ struct TensorInfo {
     std::vector<std::uint64_t> dimensions;
     std::uint32_t type{};
     std::uint64_t file_offset{};
+    std::optional<std::uint64_t> payload_size;
 };
 
 // Parses the GGUF v3 header and tensor directory. Tensor payloads remain on disk.

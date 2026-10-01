@@ -5,6 +5,7 @@
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
+#include <algorithm>
 
 namespace pokitlms::model {
 namespace {
@@ -14,6 +15,70 @@ constexpr std::uint64_t kMaxTensors = 10'000'000;
 constexpr std::uint64_t kMaxStringBytes = 16 * 1024 * 1024;
 constexpr std::uint64_t kMaxArrayEntries = 100'000'000;
 constexpr unsigned kMaxArrayDepth = 8;
+
+struct TypeLayout { std::uint64_t block_elements; std::uint64_t block_bytes; };
+
+std::optional<TypeLayout> type_layout(std::uint32_t type) {
+    switch (type) {
+        case 0: return TypeLayout{1, 4};
+        case 1: return TypeLayout{1, 2};
+        case 2: return TypeLayout{32, 18};
+        case 3: return TypeLayout{32, 20};
+        case 6: return TypeLayout{32, 22};
+        case 7: return TypeLayout{32, 24};
+        case 8: return TypeLayout{32, 34};
+        case 9: return TypeLayout{32, 36};
+        case 10: return TypeLayout{256, 84};
+        case 11: return TypeLayout{256, 110};
+        case 12: return TypeLayout{256, 144};
+        case 13: return TypeLayout{256, 176};
+        case 14: return TypeLayout{256, 210};
+        case 15: return TypeLayout{256, 292};
+        case 16: return TypeLayout{256, 66};
+        case 17: return TypeLayout{256, 74};
+        case 18: return TypeLayout{256, 98};
+        case 19: return TypeLayout{256, 50};
+        case 20: return TypeLayout{32, 18};
+        case 21: return TypeLayout{256, 110};
+        case 22: return TypeLayout{256, 82};
+        case 23: return TypeLayout{256, 136};
+        case 24: return TypeLayout{1, 1};
+        case 25: return TypeLayout{1, 2};
+        case 26: return TypeLayout{1, 4};
+        case 27: return TypeLayout{1, 8};
+        case 28: return TypeLayout{1, 8};
+        case 29: return TypeLayout{256, 56};
+        case 30: return TypeLayout{1, 2};
+        case 34: return TypeLayout{256, 54};
+        case 35: return TypeLayout{256, 66};
+        case 39: return TypeLayout{32, 17};
+        default: return std::nullopt;
+    }
+}
+
+std::optional<std::uint64_t> tensor_payload_size(const TensorInfo& tensor) {
+    const auto layout = type_layout(tensor.type);
+    if (!layout) return std::nullopt;
+    if (tensor.dimensions.front() % layout->block_elements != 0) {
+        throw std::runtime_error("tensor row is not aligned to its quantization block: " + tensor.name);
+    }
+    std::uint64_t rows = 1;
+    for (std::size_t i = 1; i < tensor.dimensions.size(); ++i) {
+        if (rows > std::numeric_limits<std::uint64_t>::max() / tensor.dimensions[i]) {
+            throw std::runtime_error("tensor dimensions overflow: " + tensor.name);
+        }
+        rows *= tensor.dimensions[i];
+    }
+    const auto blocks_per_row = tensor.dimensions.front() / layout->block_elements;
+    if (blocks_per_row > std::numeric_limits<std::uint64_t>::max() / layout->block_bytes) {
+        throw std::runtime_error("tensor row byte size overflow: " + tensor.name);
+    }
+    const auto row_bytes = blocks_per_row * layout->block_bytes;
+    if (rows > std::numeric_limits<std::uint64_t>::max() / row_bytes) {
+        throw std::runtime_error("tensor payload size overflow: " + tensor.name);
+    }
+    return rows * row_bytes;
+}
 
 class Reader {
 public:
@@ -143,6 +208,7 @@ GgufReader::GgufReader(std::filesystem::path path) {
         }
         tensor.type = reader.integer<std::uint32_t>();
         tensor.file_offset = reader.integer<std::uint64_t>();
+        tensor.payload_size = tensor_payload_size(tensor);
         if (tensor_lookup_.contains(tensor.name)) throw std::runtime_error("duplicate GGUF tensor name");
         tensor_lookup_.emplace(tensor.name, tensors_.size());
         tensors_.push_back(std::move(tensor));
@@ -151,7 +217,7 @@ GgufReader::GgufReader(std::filesystem::path path) {
     std::uint64_t alignment = 32;
     if (const auto it = metadata_.find("general.alignment"); it != metadata_.end()) {
         const auto* value = std::get_if<std::uint64_t>(&it->second.value);
-        if (!value || *value == 0 || (*value & (*value - 1)) != 0) {
+        if (!value || *value < 8 || *value % 8 != 0) {
             throw std::runtime_error("invalid GGUF general.alignment");
         }
         alignment = *value;
@@ -167,6 +233,24 @@ GgufReader::GgufReader(std::filesystem::path path) {
             throw std::runtime_error("invalid GGUF tensor data offset");
         }
         tensor.file_offset += data_offset_;
+        if (tensor.payload_size && *tensor.payload_size > file_size_ - tensor.file_offset) {
+            throw std::runtime_error("GGUF tensor payload extends beyond file: " + tensor.name);
+        }
+    }
+
+    std::vector<const TensorInfo*> by_offset;
+    by_offset.reserve(tensors_.size());
+    for (const auto& tensor : tensors_) by_offset.push_back(&tensor);
+    std::sort(by_offset.begin(), by_offset.end(), [](const auto* lhs, const auto* rhs) {
+        return lhs->file_offset < rhs->file_offset;
+    });
+    for (std::size_t i = 1; i < by_offset.size(); ++i) {
+        const auto& previous = *by_offset[i - 1];
+        const auto& current = *by_offset[i];
+        if (previous.file_offset == current.file_offset ||
+            (previous.payload_size && previous.file_offset + *previous.payload_size > current.file_offset)) {
+            throw std::runtime_error("overlapping GGUF tensor payloads");
+        }
     }
 }
 

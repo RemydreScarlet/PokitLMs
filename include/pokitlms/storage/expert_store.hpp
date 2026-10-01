@@ -1,5 +1,7 @@
 #pragma once
 
+#include "pokitlms/model/gguf_reader.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -12,6 +14,11 @@ struct ExpertSlice {
     std::uint64_t offset{};
     std::size_t size{};
 };
+
+// Splits a GGUF expert tensor into equal, contiguous slices along its last
+// (expert) dimension. Throws unless payload size and expert axis are known.
+[[nodiscard]] std::vector<ExpertSlice> split_expert_tensor(
+    const model::TensorInfo& tensor, std::size_t expert_count);
 
 // Reads routed expert weights from a model file while keeping RAM use bounded.
 // The caller owns the model-specific index that maps expert IDs to slices.

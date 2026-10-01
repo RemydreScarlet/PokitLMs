@@ -22,6 +22,27 @@
 
 namespace pokitlms::storage {
 
+std::vector<ExpertSlice> split_expert_tensor(const model::TensorInfo& tensor,
+                                             std::size_t expert_count) {
+    if (expert_count == 0 || tensor.dimensions.empty() ||
+        tensor.dimensions.back() != expert_count || !tensor.payload_size ||
+        *tensor.payload_size % expert_count != 0 ||
+        *tensor.payload_size > std::numeric_limits<std::uint64_t>::max() - tensor.file_offset) {
+        throw std::invalid_argument("tensor cannot be split into expert slices: " + tensor.name);
+    }
+    const auto bytes_per_expert = *tensor.payload_size / expert_count;
+    if (bytes_per_expert > std::numeric_limits<std::size_t>::max()) {
+        throw std::invalid_argument("expert slice exceeds addressable memory: " + tensor.name);
+    }
+    std::vector<ExpertSlice> slices;
+    slices.reserve(expert_count);
+    for (std::size_t expert = 0; expert < expert_count; ++expert) {
+        slices.push_back({tensor.file_offset + static_cast<std::uint64_t>(expert) * bytes_per_expert,
+                          static_cast<std::size_t>(bytes_per_expert)});
+    }
+    return slices;
+}
+
 class ExpertStore::Impl {
 public:
     Impl(std::filesystem::path file, std::vector<ExpertSlice> index,
