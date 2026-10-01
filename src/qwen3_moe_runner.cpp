@@ -9,10 +9,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <future>
 #include <limits>
+#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace pokitlms::model {
@@ -72,6 +78,60 @@ void apply_qwen_rope(std::span<float> values, std::size_t head_dimension,
 struct Route {
     std::size_t id;
     float probability;
+};
+
+struct ExpertWeights {
+    std::shared_ptr<const std::vector<std::byte>> gate;
+    std::shared_ptr<const std::vector<std::byte>> up;
+    std::shared_ptr<const std::vector<std::byte>> down;
+};
+
+class ExpertLoader {
+public:
+    ExpertLoader() : worker_([this] { run(); }) {}
+    ~ExpertLoader() {
+        {
+            std::lock_guard lock(mutex_);
+            stopping_ = true;
+        }
+        ready_.notify_one();
+        worker_.join();
+    }
+    ExpertLoader(const ExpertLoader&) = delete;
+    ExpertLoader& operator=(const ExpertLoader&) = delete;
+
+    [[nodiscard]] std::future<ExpertWeights> submit(std::function<ExpertWeights()> work) {
+        std::packaged_task<ExpertWeights()> task(std::move(work));
+        auto result = task.get_future();
+        {
+            std::lock_guard lock(mutex_);
+            if (stopping_) throw std::logic_error("expert loader is stopping");
+            tasks_.push_back(std::move(task));
+        }
+        ready_.notify_one();
+        return result;
+    }
+
+private:
+    void run() {
+        for (;;) {
+            std::packaged_task<ExpertWeights()> task;
+            {
+                std::unique_lock lock(mutex_);
+                ready_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
+                if (tasks_.empty() && stopping_) return;
+                task = std::move(tasks_.front());
+                tasks_.pop_front();
+            }
+            task();
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::deque<std::packaged_task<ExpertWeights()>> tasks_;
+    bool stopping_{};
+    std::thread worker_;
 };
 
 std::vector<Route> route_experts(std::span<const float> logits, std::size_t top_k,
@@ -247,6 +307,7 @@ public:
     std::vector<std::unique_ptr<storage::ExpertStore>> gate_stores;
     std::vector<std::unique_ptr<storage::ExpertStore>> up_stores;
     std::vector<std::unique_ptr<storage::ExpertStore>> down_stores;
+    ExpertLoader expert_loader;
 
     std::vector<float> forward(std::uint32_t token_id, std::uint64_t position) {
         const auto& config = index.config();
@@ -314,13 +375,26 @@ public:
                 const auto gate_slices = storage::split_expert_tensor(block.expert_gate, expert_count);
                 const auto up_slices = storage::split_expert_tensor(block.expert_up, expert_count);
                 const auto down_slices = storage::split_expert_tensor(block.expert_down, expert_count);
-                for (const auto& route : routes) {
-                    const auto gate_bytes = gate_stores[layer]->get(route.id);
-                    const auto up_bytes = up_stores[layer]->get(route.id);
-                    const auto down_bytes = down_stores[layer]->get(route.id);
-                    TensorReader gate_reader(expert_view(block.expert_gate, gate_slices[route.id]), gate_bytes);
-                    TensorReader up_reader(expert_view(block.expert_up, up_slices[route.id]), up_bytes);
-                    TensorReader down_reader(expert_view(block.expert_down, down_slices[route.id]), down_bytes);
+                const auto load_expert = [this, layer](std::size_t expert_id) {
+                    return ExpertWeights{
+                        gate_stores[layer]->get(expert_id),
+                        up_stores[layer]->get(expert_id),
+                        down_stores[layer]->get(expert_id)};
+                };
+                auto pending_weights = expert_loader.submit(
+                    [load_expert, expert_id = routes.front().id] { return load_expert(expert_id); });
+                for (std::size_t route_index = 0; route_index < routes.size(); ++route_index) {
+                    const auto& route = routes[route_index];
+                    auto weights = pending_weights.get();
+                    if (route_index + 1 < routes.size()) {
+                        pending_weights = expert_loader.submit(
+                            [load_expert, expert_id = routes[route_index + 1].id] {
+                                return load_expert(expert_id);
+                            });
+                    }
+                    TensorReader gate_reader(expert_view(block.expert_gate, gate_slices[route.id]), weights.gate);
+                    TensorReader up_reader(expert_view(block.expert_up, up_slices[route.id]), weights.up);
+                    TensorReader down_reader(expert_view(block.expert_down, down_slices[route.id]), weights.down);
                     std::vector<float> gate(intermediate), up(intermediate), activated(intermediate);
                     tensor_linear(gate_reader, normalized, gate);
                     tensor_linear(up_reader, normalized, up);

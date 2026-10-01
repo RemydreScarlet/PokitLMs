@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.24)
 
 project(PokitLMs VERSION 0.1.0 LANGUAGES CXX)
 
+find_package(Threads REQUIRED)
+
 option(POKITLMS_BUILD_TESTS "Build PokitLMs tests" ON)
 
 add_library(pokitlms
@@ -33,6 +35,7 @@ target_include_directories(pokitlms
 )
 
 target_compile_features(pokitlms PUBLIC cxx_std_20)
+target_link_libraries(pokitlms PUBLIC Threads::Threads)
 
 if(MSVC)
     target_compile_options(pokitlms PRIVATE /W4)
