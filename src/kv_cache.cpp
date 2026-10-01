@@ -1,4 +1,5 @@
 #include "pokitlms/ops/kv_cache.hpp"
+#include "simd_kernels.hpp"
 
 #include <bit>
 #include <algorithm>
@@ -134,6 +135,8 @@ void KvCache::attend(const float* query, std::size_t query_count, float* output,
     if (!std::isfinite(scale) || scale <= 0.0F) throw std::invalid_argument("attention scale must be positive");
 
     const auto group_size = query_heads / kv_heads_;
+    std::vector<float> decoded_key(precision_ == KvCachePrecision::Float16 ? key_dimension_ : 0);
+    std::vector<float> decoded_value(precision_ == KvCachePrecision::Float16 ? value_dimension_ : 0);
     for (std::size_t head = 0; head < query_heads; ++head) {
         const auto kv_head = head / group_size;
         const auto* q = query + head * key_dimension_;
@@ -142,12 +145,14 @@ void KvCache::attend(const float* query, std::size_t query_count, float* output,
             const auto position = first_position_ + index;
             const auto slot = static_cast<std::size_t>(position % capacity_);
             const auto key_offset = slot * key_size + kv_head * key_dimension_;
-            float score = 0.0F;
-            for (std::size_t d = 0; d < key_dimension_; ++d) {
-                const float key_value = precision_ == KvCachePrecision::Float32
-                    ? keys_[key_offset + d] : half_to_float(keys_f16_[key_offset + d]);
-                score += q[d] * key_value;
-            }
+            const float* key = nullptr;
+            if (precision_ == KvCachePrecision::Float16) {
+                for (std::size_t d = 0; d < key_dimension_; ++d) {
+                    decoded_key[d] = half_to_float(keys_f16_[key_offset + d]);
+                }
+                key = decoded_key.data();
+            } else key = keys_.data() + key_offset;
+            float score = detail::dot_f32(q, key, key_dimension_);
             score *= scale;
             scores_[index] = score;
             max_score = std::max(max_score, score);
@@ -165,11 +170,14 @@ void KvCache::attend(const float* query, std::size_t query_count, float* output,
             const auto slot = static_cast<std::size_t>(position % capacity_);
             const auto value_offset = slot * value_size + kv_head * value_dimension_;
             const float probability = scores_[index] / denominator;
-            for (std::size_t d = 0; d < value_dimension_; ++d) {
-                const float value = precision_ == KvCachePrecision::Float32
-                    ? values_[value_offset + d] : half_to_float(values_f16_[value_offset + d]);
-                out[d] += probability * value;
-            }
+            const float* value = nullptr;
+            if (precision_ == KvCachePrecision::Float16) {
+                for (std::size_t d = 0; d < value_dimension_; ++d) {
+                    decoded_value[d] = half_to_float(values_f16_[value_offset + d]);
+                }
+                value = decoded_value.data();
+            } else value = values_.data() + value_offset;
+            detail::scale_add_f32(out, value, probability, value_dimension_);
         }
     }
 }

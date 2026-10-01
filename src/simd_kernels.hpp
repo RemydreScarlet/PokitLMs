@@ -47,4 +47,18 @@ inline float dot_i8_f32(const float* lhs, const std::int8_t* quantized,
     return sum;
 }
 
+inline void scale_add_f32(float* destination, const float* source, float scale,
+                          std::size_t count) noexcept {
+    std::size_t i = 0;
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    const float32x4_t factor = vdupq_n_f32(scale);
+    for (; i + 4 <= count; i += 4) {
+        const auto dst = vld1q_f32(destination + i);
+        const auto src = vld1q_f32(source + i);
+        vst1q_f32(destination + i, vfmaq_f32(dst, src, factor));
+    }
+#endif
+    for (; i < count; ++i) destination[i] += scale * source[i];
+}
+
 }  // namespace pokitlms::detail
