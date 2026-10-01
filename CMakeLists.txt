@@ -13,6 +13,7 @@ add_library(pokitlms
     src/rope.cpp
     src/expert_store.cpp
     src/gguf_reader.cpp
+    src/architecture.cpp
     src/c_api.cpp
 )
 

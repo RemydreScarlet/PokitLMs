@@ -20,6 +20,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Scalar reference linear kernels for GGUF Q4_0 and Q8_0 weights.
 - File-backed expert slice reader with an LRU cache, disk-read accounting, and concurrent positioned reads on POSIX.
 - GGUF v3 metadata and tensor-directory reader; payloads remain file-backed.
+- Validated GGUF architecture parameters for Qwen3-MoE (`qwen3moe`); this is metadata support, not a complete model executor.
 - Streaming MoE routing callback that selects only the top-k expert IDs with O(top-k) routing memory.
 - C API version function.
 - Tokenizer, quantized kernels, architecture-specific model graph, and end-to-end generation are not implemented yet.
