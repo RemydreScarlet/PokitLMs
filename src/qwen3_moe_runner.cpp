@@ -495,12 +495,15 @@ public:
     std::vector<AssistantTokenSequence> assistant_token_sequences;
     ExpertLoader expert_loader;
 
-    std::vector<float> forward(std::uint32_t token_id, std::uint64_t position,
-                               bool calculate_logits = true) {
+    void forward_into(std::uint32_t token_id, std::uint64_t position,
+                      bool calculate_logits, std::vector<float>* logits_output) {
         const auto& config = index.config();
         if (token_id >= index.vocabulary_size()) throw std::out_of_range("token id exceeds model vocabulary");
         if (position != next_position || position >= model_context) {
             throw std::invalid_argument("token position is not the next position in this decode state");
+        }
+        if (calculate_logits && !logits_output) {
+            throw std::invalid_argument("logits output buffer is required");
         }
         try {
             auto& hidden = scratch.hidden;
@@ -604,16 +607,21 @@ public:
                 for (std::size_t i = 0; i < hidden_size; ++i) hidden[i] += moe_result[i];
             }
             ++next_position;
-            if (!calculate_logits) return {};
+            if (!calculate_logits) return;
             auto& final_hidden = scratch.final_hidden;
             rms_norm(hidden, output_norm, final_hidden, epsilon);
-            std::vector<float> logits(as_size(index.vocabulary_size(), "vocabulary_size"));
-            tensor_linear(output_reader, final_hidden, logits, 0, &scratch.tensor_linear);
-            return logits;
+            logits_output->resize(as_size(index.vocabulary_size(), "vocabulary_size"));
+            tensor_linear(output_reader, final_hidden, *logits_output, 0, &scratch.tensor_linear);
         } catch (...) {
             reset();
             throw;
         }
+    }
+
+    std::vector<float> forward(std::uint32_t token_id, std::uint64_t position) {
+        std::vector<float> logits;
+        forward_into(token_id, position, true, &logits);
+        return logits;
     }
 
     void reset() {
@@ -686,12 +694,13 @@ public:
             history.assign(prompt.begin(), prompt.end());
             history.reserve(prompt.size() + max_new_tokens);
         }
-        std::vector<float> logits = prefix_matches ? session_logits : std::vector<float>{};
         try {
             const auto prefill_start = std::chrono::steady_clock::now();
             const auto prefill_start_position = session_tokens.size();
             for (std::size_t i = prefill_start_position; i < prompt.size(); ++i) {
-                logits = forward(prompt[i], i, i + 1 == prompt.size());
+                const bool is_last_prompt_token = i + 1 == prompt.size();
+                forward_into(prompt[i], i, is_last_prompt_token,
+                             is_last_prompt_token ? &session_logits : nullptr);
                 session_tokens.push_back(prompt[i]);
             }
             if (stats) {
@@ -703,12 +712,12 @@ public:
             std::mt19937_64 random(options.seed);
             generated.reserve(max_new_tokens);
             for (std::size_t i = 0; i < max_new_tokens; ++i) {
-                const auto token = sample_token(logits, history, options, random);
+                const auto token = sample_token(session_logits, history, options, random);
                 generated.push_back(token);
                 if (options.repetition_penalty != 1.0F) history.push_back(token);
                 if (token == tokenizer.eos_token_id()) break;
                 if (i + 1 < max_new_tokens) {
-                    logits = forward(token, prompt.size() + i);
+                    forward_into(token, prompt.size() + i, true, &session_logits);
                     session_tokens.push_back(token);
                 }
             }
@@ -718,7 +727,6 @@ public:
                         std::chrono::steady_clock::now() - decode_start).count());
                 stats->generated_tokens = generated.size();
             }
-            session_logits = std::move(logits);
         } catch (...) {
             reset();
             throw;
@@ -741,7 +749,7 @@ Qwen3MoeRunner& Qwen3MoeRunner::operator=(Qwen3MoeRunner&&) noexcept = default;
 
 std::vector<float> Qwen3MoeRunner::forward_token(std::uint32_t token_id, std::uint64_t position) {
     if (!impl_) throw std::logic_error("Qwen3-MoE runner has been moved from");
-    return impl_->forward(token_id, position, true);
+    return impl_->forward(token_id, position);
 }
 std::vector<std::uint32_t> Qwen3MoeRunner::generate_tokens(
     std::span<const std::uint32_t> prompt, std::size_t max_new_tokens,
