@@ -35,7 +35,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Qwen GPT-2 byte-level BPE encoder/decoder using GGUF vocabulary, merge, token-type, and special-token metadata.
 - Streaming MoE routing callback that selects only the top-k expert IDs with O(top-k) routing memory.
 - Fixed-capacity ring-buffer KV cache and numerically stable grouped-query causal attention primitive.
-- FP32 one-token Gated DeltaNet recurrent-step primitive with reusable scratch and a stateful depthwise causal-convolution step for hybrid Qwen3.5 layers; the Qwen3.5 model runner is not implemented yet.
+- FP32 one-token Gated DeltaNet recurrent-step primitive with reusable scratch, stateful depthwise causal convolution, and gated RMSNorm for hybrid Qwen3.5 layers; the Qwen3.5 model runner is not implemented yet.
 - FP16 KV residency option; Qwen3-MoE runner uses it by default to halve cache storage while accumulating attention in FP32.
 - Optional blockwise Q8_0 KV storage with FP32 attention accumulation for smaller mobile KV footprints; FP16 remains the default. KV resident bytes are exposed to C++/C and printed by the benchmark CLI.
 - Bounded sliding KV window: older positions roll out while RoPE positions continue up to the model's advertised context length.
