@@ -21,6 +21,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - File-backed expert slice reader with an LRU cache, disk-read accounting, and concurrent positioned reads on POSIX.
 - Shared random-access model file and GGUF tensor row reader; F32/F16 rows can be converted without loading a full tensor.
 - Disk-backed GGUF matrix-vector dispatch in bounded row batches for F32/F16, Q2_K, Q3_K, Q4_0, Q4_K, and Q8_0.
+- Single-token Qwen3-MoE decode path with per-layer GQA KV state, Q/K RMSNorm, RoPE, top-k routing, and cached on-demand expert execution.
 - GGUF v3 metadata/tensor-directory reader with known-format payload extent validation; payloads remain file-backed.
 - Expert tensor splitting by the GGUF last dimension, ready to feed routed slices into the bounded store.
 - Validated GGUF architecture parameters for Qwen3-MoE (`qwen3moe`); this is metadata support, not a complete model executor.
@@ -29,7 +30,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Streaming MoE routing callback that selects only the top-k expert IDs with O(top-k) routing memory.
 - Fixed-capacity ring-buffer KV cache and numerically stable grouped-query causal attention primitive.
 - C API version function.
-- Additional quantized kernels, architecture execution graph, and end-to-end generation are not implemented yet.
+- Prompt formatting, sampling, multi-token generation API, broader quantized format coverage, and optimized ARM kernels are not implemented yet. The decode path is currently compile-verified but has not been compared against a reference model output.
 
 ## Build
 

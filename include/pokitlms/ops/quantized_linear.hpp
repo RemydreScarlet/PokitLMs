@@ -1,10 +1,16 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <vector>
 
 namespace pokitlms {
+
+// Decodes one supported GGUF quantized row into FP32 values.
+void dequantize_quantized_row(std::uint32_t ggml_type,
+                              std::span<const std::byte> encoded,
+                              std::span<float> output);
 
 // Scalar reference matmuls for GGUF Q4_0 (type 2) and Q8_0 (type 8).
 // Weight rows are contiguous and laid out as [output_features, input_features].

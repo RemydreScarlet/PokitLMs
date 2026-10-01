@@ -233,6 +233,55 @@ void linear_quantized(std::span<const float> input,
 
 }  // namespace
 
+void dequantize_quantized_row(std::uint32_t type,
+                              std::span<const std::byte> encoded,
+                              std::span<float> output) {
+    if (type == 2 || type == 8) {
+        constexpr std::size_t block_elements = 32;
+        const std::size_t block_bytes = type == 2 ? 18 : 34;
+        if (output.empty() || output.size() % block_elements != 0 ||
+            encoded.size() != output.size() / block_elements * block_bytes) {
+            throw std::invalid_argument("invalid Q4_0/Q8_0 row dimensions");
+        }
+        for (std::size_t block = 0; block < output.size() / block_elements; ++block) {
+            const auto* data = encoded.data() + block * block_bytes;
+            const float scale = half_to_float(read_u16(data));
+            if (type == 2) {
+                for (std::size_t i = 0; i < 16; ++i) {
+                    const auto packed = std::to_integer<std::uint8_t>(data[2 + i]);
+                    output[block * 32 + i] = scale * (static_cast<int>(packed & 0x0fU) - 8);
+                    output[block * 32 + i + 16] = scale * (static_cast<int>(packed >> 4) - 8);
+                }
+            } else {
+                for (std::size_t i = 0; i < 32; ++i) {
+                    const auto q = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(data[2 + i]));
+                    output[block * 32 + i] = scale * static_cast<float>(q);
+                }
+            }
+        }
+        return;
+    }
+    if (type == 10 || type == 11 || type == 12) {
+        constexpr std::size_t block_elements = 256;
+        const std::size_t block_bytes = type == 10 ? 84 : type == 11 ? 110 : 144;
+        if (output.empty() || output.size() % block_elements != 0 ||
+            encoded.size() != output.size() / block_elements * block_bytes) {
+            throw std::invalid_argument("invalid K-quantized row dimensions");
+        }
+        std::array<float, block_elements> decoded{};
+        for (std::size_t block = 0; block < output.size() / block_elements; ++block) {
+            const auto* data = encoded.data() + block * block_bytes;
+            if (type == 10) decode_q2_k(data, decoded);
+            else if (type == 11) decode_q3_k(data, decoded);
+            else decode_q4_k(data, decoded);
+            std::copy(decoded.begin(), decoded.end(), output.begin() +
+                      static_cast<std::ptrdiff_t>(block * block_elements));
+        }
+        return;
+    }
+    throw std::invalid_argument("unsupported GGUF quantized type for row decoding");
+}
+
 void linear_q4_0(std::span<const float> input,
                  std::span<const std::byte> weights,
                  std::size_t output_features,

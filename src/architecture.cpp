@@ -32,6 +32,13 @@ std::uint64_t optional_u64(const GgufReader& model, const std::string& key,
     return found == model.metadata().end() ? fallback : as_u64(found->second, key);
 }
 
+bool optional_bool(const GgufReader& model, const std::string& key, bool fallback) {
+    const auto found = model.metadata().find(key);
+    if (found == model.metadata().end()) return fallback;
+    if (const auto* value = std::get_if<bool>(&found->second.value)) return *value;
+    throw std::runtime_error("GGUF metadata has wrong boolean type: " + key);
+}
+
 double as_number(const MetadataValue& value, const std::string& key) {
     if (const auto* v = std::get_if<double>(&value.value)) return *v;
     if (const auto* v = std::get_if<std::uint64_t>(&value.value)) return static_cast<double>(*v);
@@ -76,6 +83,7 @@ TransformerConfig load_transformer_config(const GgufReader& model) {
     config.expert_count = require_u64(model, prefix + "expert_count");
     config.experts_per_token = require_u64(model, prefix + "expert_used_count");
     config.expert_feed_forward_length = require_u64(model, prefix + "expert_feed_forward_length");
+    config.expert_weights_norm = optional_bool(model, prefix + "expert_weights_norm", false);
     config.rms_norm_epsilon = require_number(model, prefix + "attention.layer_norm_rms_epsilon");
     config.rope_frequency_base = require_number(model, prefix + "rope.freq_base");
 
@@ -100,7 +108,9 @@ TransformerConfig load_transformer_config(const GgufReader& model) {
         throw std::runtime_error("inconsistent qwen3moe model parameters");
     }
     if (config.attention_heads > std::numeric_limits<std::uint64_t>::max() / config.key_length ||
-        config.key_value_heads > std::numeric_limits<std::uint64_t>::max() / config.key_length) {
+        config.key_value_heads > std::numeric_limits<std::uint64_t>::max() / config.key_length ||
+        config.attention_heads > std::numeric_limits<std::uint64_t>::max() / config.value_length ||
+        config.key_value_heads > std::numeric_limits<std::uint64_t>::max() / config.value_length) {
         throw std::runtime_error("attention dimensions overflow");
     }
     return config;

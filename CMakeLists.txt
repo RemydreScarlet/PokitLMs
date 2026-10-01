@@ -16,6 +16,7 @@ add_library(pokitlms
     src/gguf_reader.cpp
     src/tensor_reader.cpp
     src/tensor_linear.cpp
+    src/qwen3_moe_runner.cpp
     src/architecture.cpp
     src/kv_cache.cpp
     src/qwen3_moe_index.cpp

@@ -21,6 +21,7 @@ struct TransformerConfig {
     std::uint64_t expert_count{};
     std::uint64_t experts_per_token{};
     std::uint64_t expert_feed_forward_length{};
+    bool expert_weights_norm{};
     double rms_norm_epsilon{};
     double rope_frequency_base{};
 };

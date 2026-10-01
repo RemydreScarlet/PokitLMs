@@ -1,6 +1,7 @@
 #include "pokitlms/model/tensor_reader.hpp"
 
 #include <bit>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -68,6 +69,27 @@ TensorReader::TensorReader(std::shared_ptr<storage::ModelFile> file, TensorInfo 
     row_bytes_ = static_cast<std::size_t>(bytes);
 }
 
+TensorReader::TensorReader(TensorInfo tensor,
+                           std::shared_ptr<const std::vector<std::byte>> payload)
+    : memory_(std::move(payload)), tensor_(std::move(tensor)) {
+    if (!memory_ || tensor_.dimensions.empty() || !tensor_.payload_size ||
+        *tensor_.payload_size != memory_->size()) {
+        throw std::invalid_argument("in-memory tensor reader requires an exact payload");
+    }
+    row_count_ = 1;
+    for (std::size_t i = 1; i < tensor_.dimensions.size(); ++i) {
+        if (tensor_.dimensions[i] != 0 &&
+            row_count_ > std::numeric_limits<std::uint64_t>::max() / tensor_.dimensions[i]) {
+            throw std::invalid_argument("tensor row count overflows");
+        }
+        row_count_ *= tensor_.dimensions[i];
+    }
+    if (row_count_ == 0 || *tensor_.payload_size % row_count_ != 0) {
+        throw std::invalid_argument("tensor payload does not divide into rows");
+    }
+    row_bytes_ = static_cast<std::size_t>(*tensor_.payload_size / row_count_);
+}
+
 const TensorInfo& TensorReader::tensor() const noexcept { return tensor_; }
 std::uint64_t TensorReader::row_count() const noexcept { return row_count_; }
 std::size_t TensorReader::row_bytes() const noexcept { return row_bytes_; }
@@ -86,6 +108,11 @@ std::vector<std::byte> TensorReader::read_rows(std::uint64_t first_row,
     const auto byte_offset = first_row * static_cast<std::uint64_t>(row_bytes_);
     if (byte_offset > std::numeric_limits<std::uint64_t>::max() - tensor_.file_offset) {
         throw std::out_of_range("tensor row offset overflows");
+    }
+    if (memory_) {
+        std::vector<std::byte> result(row_bytes_ * rows);
+        std::memcpy(result.data(), memory_->data() + static_cast<std::size_t>(byte_offset), result.size());
+        return result;
     }
     return file_->read(tensor_.file_offset + byte_offset, row_bytes_ * rows);
 }
@@ -120,6 +147,7 @@ std::vector<std::byte> TensorReader::read_all() const {
     if (*tensor_.payload_size > std::numeric_limits<std::size_t>::max()) {
         throw std::length_error("tensor is too large to read into memory");
     }
+    if (memory_) return *memory_;
     return file_->read(tensor_.file_offset, static_cast<std::size_t>(*tensor_.payload_size));
 }
 

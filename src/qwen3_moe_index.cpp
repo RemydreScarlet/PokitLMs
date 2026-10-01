@@ -63,7 +63,8 @@ Qwen3MoeIndex::Qwen3MoeIndex(const GgufReader& model)
             require_tensor(model, prefix + "attn_k.weight", {config_.embedding_length, key_dimension}),
             require_tensor(model, prefix + "attn_k_norm.weight", {config_.key_length}),
             require_tensor(model, prefix + "attn_v.weight", {config_.embedding_length, value_dimension}),
-            require_tensor(model, prefix + "attn_output.weight", {query_dimension, config_.embedding_length}),
+            require_tensor(model, prefix + "attn_output.weight", {
+                config_.attention_heads * config_.value_length, config_.embedding_length}),
             require_tensor(model, prefix + "ffn_norm.weight", {config_.embedding_length}),
             require_tensor(model, prefix + "ffn_gate_inp.weight", {config_.embedding_length, config_.expert_count}),
             require_tensor(model, prefix + "ffn_gate_exps.weight", expert_shape),

@@ -15,6 +15,7 @@ namespace pokitlms::model {
 class TensorReader {
 public:
     TensorReader(std::shared_ptr<storage::ModelFile> file, TensorInfo tensor);
+    TensorReader(TensorInfo tensor, std::shared_ptr<const std::vector<std::byte>> payload);
 
     [[nodiscard]] const TensorInfo& tensor() const noexcept;
     [[nodiscard]] std::uint64_t row_count() const noexcept;
@@ -27,6 +28,7 @@ public:
 
 private:
     std::shared_ptr<storage::ModelFile> file_;
+    std::shared_ptr<const std::vector<std::byte>> memory_;
     TensorInfo tensor_;
     std::uint64_t row_count_{};
     std::size_t row_bytes_{};
