@@ -260,11 +260,13 @@ std::uint32_t sample_token(std::span<const float> logits,
         }
         return static_cast<std::uint32_t>(best_id);
     }
-    std::vector<float> adjusted(logits.begin(), logits.end());
-    for (const float logit : adjusted) {
-        if (!std::isfinite(logit)) throw std::runtime_error("model produced non-finite logits");
-    }
+    std::vector<float> adjusted;
+    std::span<const float> sampling_logits = logits;
     if (options.repetition_penalty != 1.0F) {
+        adjusted.assign(logits.begin(), logits.end());
+        for (const float logit : adjusted) {
+            if (!std::isfinite(logit)) throw std::runtime_error("model produced non-finite logits");
+        }
         std::vector<bool> seen(adjusted.size(), false);
         for (const auto id : history) {
             if (id >= adjusted.size()) continue;
@@ -274,17 +276,22 @@ std::uint32_t sample_token(std::span<const float> logits,
                 ? adjusted[id] * options.repetition_penalty
                 : adjusted[id] / options.repetition_penalty;
         }
+        sampling_logits = adjusted;
+    } else {
+        for (const float logit : logits) {
+            if (!std::isfinite(logit)) throw std::runtime_error("model produced non-finite logits");
+        }
     }
     if (options.temperature == 0.0F) {
-        return static_cast<std::uint32_t>(std::distance(adjusted.begin(),
-            std::max_element(adjusted.begin(), adjusted.end())));
+        return static_cast<std::uint32_t>(std::distance(sampling_logits.begin(),
+            std::max_element(sampling_logits.begin(), sampling_logits.end())));
     }
 
     const double inverse_temperature = 1.0 / static_cast<double>(options.temperature);
     std::vector<std::pair<double, std::uint32_t>> ranked;
-    ranked.reserve(adjusted.size());
-    for (std::size_t id = 0; id < adjusted.size(); ++id) {
-        ranked.emplace_back(static_cast<double>(adjusted[id]) * inverse_temperature,
+    ranked.reserve(sampling_logits.size());
+    for (std::size_t id = 0; id < sampling_logits.size(); ++id) {
+        ranked.emplace_back(static_cast<double>(sampling_logits[id]) * inverse_temperature,
                             static_cast<std::uint32_t>(id));
     }
     const auto order = [](const auto& lhs, const auto& rhs) {
