@@ -14,6 +14,7 @@ add_library(pokitlms
     src/quantized_linear.cpp
     src/feed_forward.cpp
     src/rope.cpp
+    src/causal_conv1d.cpp
     src/gated_delta_net.cpp
     src/expert_store.cpp
     src/model_file.cpp
