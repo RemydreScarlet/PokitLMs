@@ -12,7 +12,9 @@ add_library(pokitlms
     src/feed_forward.cpp
     src/rope.cpp
     src/expert_store.cpp
+    src/model_file.cpp
     src/gguf_reader.cpp
+    src/tensor_reader.cpp
     src/architecture.cpp
     src/kv_cache.cpp
     src/qwen3_moe_index.cpp

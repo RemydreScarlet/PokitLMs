@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pokitlms/model/gguf_reader.hpp"
+#include "pokitlms/storage/model_file.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -25,6 +26,8 @@ struct ExpertSlice {
 class ExpertStore {
 public:
     ExpertStore(std::filesystem::path path, std::vector<ExpertSlice> experts,
+                std::size_t cache_capacity_bytes);
+    ExpertStore(std::shared_ptr<ModelFile> file, std::vector<ExpertSlice> experts,
                 std::size_t cache_capacity_bytes);
     ~ExpertStore();
 
