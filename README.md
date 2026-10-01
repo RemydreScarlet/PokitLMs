@@ -35,6 +35,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Expert cache telemetry from the runner: total budget/residency, expert bytes loaded, hits, and misses.
 - One persistent storage worker prefetches the next routed expert while the CPU computes the current expert.
 - C API version function.
+- C ABI opaque Qwen3-MoE handle for creation, serialized text generation, and cache/storage telemetry.
 - Model-specific chat-template handling, broader quantized format coverage, and optimized ARM kernels are not implemented yet. The decode path is currently compile-verified but has not been compared against a reference model output.
 
 ## Build
