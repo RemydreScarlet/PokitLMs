@@ -38,11 +38,11 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Bounded sliding KV window: older positions roll out while RoPE positions continue up to the model's advertised context length.
 - Expert cache telemetry from the runner and C API: total budget/residency, bytes and operations read, cumulative read time, hits, and misses.
 - Expert cache memory is apportioned in whole tensor-slice slots under one aggregate budget, so large expert matrices are not silently left uncached when an equal per-store share cannot hold even one slice.
-- One persistent storage worker prefetches the next routed expert while the CPU computes the current expert.
+- Four persistent I/O workers load an expert's gate/up/down slices concurrently and prefetch the next routed expert while the CPU computes the current expert.
 - C API version function.
 - C ABI opaque Qwen3-MoE handle for creation, serialized text generation, and cache/storage telemetry.
 - Qwen3 single-message chat helper in the C++ and C APIs, including the standard user/assistant boundary tokens.
-- Model-specific chat-template handling, broader quantized format coverage, and optimized ARM kernels are not implemented yet. The decode path is currently compile-verified but has not been compared against a reference model output.
+- Multi-turn chat-template handling, broader quantized format coverage, and optimized ARM kernels are still incomplete. The decode path is compile-verified but has not been compared against a reference model output.
 
 ## Build
 
@@ -82,5 +82,5 @@ goes to stdout and the measurements go to stderr.
 1. Cross-build and compare tokenizer, Qwen3-MoE decode, and each quantized format against reference outputs.
 2. Add model-specific prompt templates and tied-output model support.
 3. Expand tensor-format coverage for common GGUF quantizations.
-4. Add async storage reads and compute/I/O overlap after the synchronous path is validated.
+4. Measure and tune the asynchronous storage lanes and cache policy on target ARM64 devices.
 5. Measure on target ARM64 devices before choosing cache defaults or adding platform-specific acceleration.

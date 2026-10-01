@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 namespace pokitlms::model {
@@ -128,25 +129,42 @@ struct ExpertWeights {
 
 class ExpertLoader {
 public:
-    ExpertLoader() : worker_([this] { run(); }) {}
+    ExpertLoader() {
+        workers_.reserve(kWorkerCount);
+        try {
+            for (std::size_t i = 0; i < kWorkerCount; ++i) {
+                workers_.emplace_back([this] { run(); });
+            }
+        } catch (...) {
+            {
+                std::lock_guard lock(mutex_);
+                stopping_ = true;
+            }
+            ready_.notify_all();
+            for (auto& worker : workers_) if (worker.joinable()) worker.join();
+            throw;
+        }
+    }
     ~ExpertLoader() {
         {
             std::lock_guard lock(mutex_);
             stopping_ = true;
         }
-        ready_.notify_one();
-        worker_.join();
+        ready_.notify_all();
+        for (auto& worker : workers_) worker.join();
     }
     ExpertLoader(const ExpertLoader&) = delete;
     ExpertLoader& operator=(const ExpertLoader&) = delete;
 
-    [[nodiscard]] std::future<ExpertWeights> submit(std::function<ExpertWeights()> work) {
-        std::packaged_task<ExpertWeights()> task(std::move(work));
-        auto result = task.get_future();
+    template <typename Work>
+    [[nodiscard]] auto submit(Work&& work) {
+        using Result = std::invoke_result_t<Work>;
+        auto task = std::make_shared<std::packaged_task<Result()>>(std::forward<Work>(work));
+        auto result = task->get_future();
         {
             std::lock_guard lock(mutex_);
             if (stopping_) throw std::logic_error("expert loader is stopping");
-            tasks_.push_back(std::move(task));
+            tasks_.emplace_back([task] { (*task)(); });
         }
         ready_.notify_one();
         return result;
@@ -155,7 +173,7 @@ public:
 private:
     void run() {
         for (;;) {
-            std::packaged_task<ExpertWeights()> task;
+            std::function<void()> task;
             {
                 std::unique_lock lock(mutex_);
                 ready_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
@@ -167,11 +185,12 @@ private:
         }
     }
 
+    static constexpr std::size_t kWorkerCount = 4;
     std::mutex mutex_;
     std::condition_variable ready_;
-    std::deque<std::packaged_task<ExpertWeights()>> tasks_;
+    std::deque<std::function<void()>> tasks_;
     bool stopping_{};
-    std::thread worker_;
+    std::vector<std::thread> workers_;
 };
 
 std::vector<Route> route_experts(std::span<const float> logits, std::size_t top_k,
@@ -436,10 +455,16 @@ public:
                 const auto up_slices = storage::split_expert_tensor(block.expert_up, expert_count);
                 const auto down_slices = storage::split_expert_tensor(block.expert_down, expert_count);
                 const auto load_expert = [this, layer](std::size_t expert_id) {
-                    return ExpertWeights{
-                        gate_stores[layer]->get(expert_id),
-                        up_stores[layer]->get(expert_id),
-                        down_stores[layer]->get(expert_id)};
+                    auto gate = expert_loader.submit([this, layer, expert_id] {
+                        return gate_stores[layer]->get(expert_id);
+                    });
+                    auto up = expert_loader.submit([this, layer, expert_id] {
+                        return up_stores[layer]->get(expert_id);
+                    });
+                    auto down = expert_loader.submit([this, layer, expert_id] {
+                        return down_stores[layer]->get(expert_id);
+                    });
+                    return ExpertWeights{gate.get(), up.get(), down.get()};
                 };
                 auto pending_weights = expert_loader.submit(
                     [load_expert, expert_id = routes.front().id] { return load_expert(expert_id); });
