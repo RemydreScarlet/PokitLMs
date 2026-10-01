@@ -7,6 +7,11 @@ option(POKITLMS_BUILD_TESTS "Build PokitLMs tests" ON)
 add_library(pokitlms
     src/tensor.cpp
     src/rms_norm.cpp
+    src/linear.cpp
+    src/feed_forward.cpp
+    src/rope.cpp
+    src/expert_store.cpp
+    src/gguf_reader.cpp
     src/c_api.cpp
 )
 
