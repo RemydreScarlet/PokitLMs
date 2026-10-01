@@ -8,6 +8,7 @@
 #include "pokitlms/ops/rms_norm.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <condition_variable>
 #include <deque>
@@ -29,6 +30,44 @@ std::size_t as_size(std::uint64_t value, const char* label) {
         throw std::invalid_argument(std::string("model dimension exceeds address space: ") + label);
     }
     return static_cast<std::size_t>(value);
+}
+
+std::vector<std::size_t> allocate_expert_cache_budgets(
+    const std::vector<std::size_t>& slice_sizes, std::size_t total_budget) {
+    std::vector<std::size_t> capacities(slice_sizes.size(), 0);
+    std::vector<std::size_t> order(slice_sizes.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&slice_sizes](std::size_t lhs, std::size_t rhs) {
+        return slice_sizes[lhs] < slice_sizes[rhs] ||
+               (slice_sizes[lhs] == slice_sizes[rhs] && lhs < rhs);
+    });
+
+    std::size_t remaining = total_budget;
+    std::vector<std::size_t> active;
+    for (const auto store : order) {
+        const auto bytes = slice_sizes[store];
+        if (bytes == 0 || bytes > remaining) continue;
+        capacities[store] = bytes;
+        remaining -= bytes;
+        active.push_back(store);
+    }
+
+    // Give each cache one entry first, then add whole-entry slots in rounds.
+    // This preserves a hard aggregate budget without disabling large experts
+    // just because an equal per-store fraction is too small to admit one.
+    bool allocated = true;
+    while (allocated) {
+        allocated = false;
+        for (const auto store : active) {
+            const auto bytes = slice_sizes[store];
+            if (bytes <= remaining) {
+                capacities[store] += bytes;
+                remaining -= bytes;
+                allocated = true;
+            }
+        }
+    }
+    return capacities;
 }
 
 std::vector<float> load_vector(const std::shared_ptr<storage::ModelFile>& file,
@@ -263,7 +302,24 @@ public:
         if (layer_count > std::numeric_limits<std::size_t>::max() / 3) {
             throw std::invalid_argument("model has too many layers for expert cache accounting");
         }
-        const auto per_store_budget = cache_budget / std::max<std::size_t>(1, layer_count * 3);
+        std::vector<std::array<std::vector<storage::ExpertSlice>, 3>> expert_slices;
+        std::vector<std::size_t> expert_slice_sizes;
+        expert_slices.reserve(layer_count);
+        expert_slice_sizes.reserve(layer_count * 3);
+        const auto expert_count = as_size(config.expert_count, "expert_count");
+        for (const auto& block : index.blocks()) {
+            std::array<std::vector<storage::ExpertSlice>, 3> slices{
+                storage::split_expert_tensor(block.expert_gate, expert_count),
+                storage::split_expert_tensor(block.expert_up, expert_count),
+                storage::split_expert_tensor(block.expert_down, expert_count)};
+            for (const auto& tensor_slices : slices) {
+                if (tensor_slices.empty()) throw std::runtime_error("expert tensor has no slices");
+                expert_slice_sizes.push_back(tensor_slices.front().size);
+            }
+            expert_slices.push_back(std::move(slices));
+        }
+        const auto cache_capacities = allocate_expert_cache_budgets(expert_slice_sizes,
+                                                                     cache_budget);
         attention_norms.reserve(layer_count);
         query_norms.reserve(layer_count);
         key_norms.reserve(layer_count);
@@ -272,8 +328,8 @@ public:
         gate_stores.reserve(layer_count);
         up_stores.reserve(layer_count);
         down_stores.reserve(layer_count);
-        const auto expert_count = as_size(config.expert_count, "expert_count");
-        for (const auto& block : index.blocks()) {
+        for (std::size_t layer = 0; layer < index.blocks().size(); ++layer) {
+            const auto& block = index.blocks()[layer];
             attention_norms.push_back(load_vector(file, block.attention_norm));
             query_norms.push_back(load_vector(file, block.query_norm));
             key_norms.push_back(load_vector(file, block.key_norm));
@@ -281,11 +337,11 @@ public:
             kv_caches.emplace_back(context_capacity, kv_heads, key_dim, value_dim,
                                    KvCachePrecision::Float16);
             gate_stores.push_back(std::make_unique<storage::ExpertStore>(
-                file, storage::split_expert_tensor(block.expert_gate, expert_count), per_store_budget));
+                file, std::move(expert_slices[layer][0]), cache_capacities[layer * 3]));
             up_stores.push_back(std::make_unique<storage::ExpertStore>(
-                file, storage::split_expert_tensor(block.expert_up, expert_count), per_store_budget));
+                file, std::move(expert_slices[layer][1]), cache_capacities[layer * 3 + 1]));
             down_stores.push_back(std::make_unique<storage::ExpertStore>(
-                file, storage::split_expert_tensor(block.expert_down, expert_count), per_store_budget));
+                file, std::move(expert_slices[layer][2]), cache_capacities[layer * 3 + 2]));
         }
         output_norm = load_vector(file, index.output_norm());
         next_position = 0;

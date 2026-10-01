@@ -37,6 +37,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - FP16 KV residency option; Qwen3-MoE runner uses it by default to halve cache storage while accumulating attention in FP32.
 - Bounded sliding KV window: older positions roll out while RoPE positions continue up to the model's advertised context length.
 - Expert cache telemetry from the runner and C API: total budget/residency, bytes and operations read, cumulative read time, hits, and misses.
+- Expert cache memory is apportioned in whole tensor-slice slots under one aggregate budget, so large expert matrices are not silently left uncached when an equal per-store share cannot hold even one slice.
 - One persistent storage worker prefetches the next routed expert while the CPU computes the current expert.
 - C API version function.
 - C ABI opaque Qwen3-MoE handle for creation, serialized text generation, and cache/storage telemetry.
