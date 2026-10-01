@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 #define POKITLMS_VERSION_MAJOR 0
-#define POKITLMS_VERSION_MINOR 1
+#define POKITLMS_VERSION_MINOR 2
 #define POKITLMS_VERSION_PATCH 0
 
 const char* pokitlms_version(void);
@@ -37,6 +37,8 @@ typedef struct pokitlms_expert_cache_stats {
     size_t capacity_bytes;
     size_t resident_bytes;
     uint64_t bytes_read;
+    uint64_t read_operations; // Expert-cache misses that performed a file read.
+    uint64_t read_time_ns;    // Cumulative read-call time, including cache advice.
     uint64_t hits;
     uint64_t misses;
 } pokitlms_expert_cache_stats;

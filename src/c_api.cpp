@@ -36,7 +36,7 @@ pokitlms::model::GenerationOptions convert_options(const pokitlms_generation_opt
 }  // namespace
 
 const char* pokitlms_version(void) {
-    return "0.1.0";
+    return "0.2.0";
 }
 
 void pokitlms_generation_options_init(pokitlms_generation_options* options) {
@@ -143,7 +143,7 @@ pokitlms_status pokitlms_model_get_expert_cache_stats(
     try {
         const auto stats = model->runner.expert_cache_stats();
         *out_stats = {stats.capacity_bytes, stats.resident_bytes, stats.bytes_read,
-                      stats.hits, stats.misses};
+                      stats.read_operations, stats.read_time_ns, stats.hits, stats.misses};
         return POKITLMS_STATUS_OK;
     } catch (...) {
         return POKITLMS_STATUS_INTERNAL_ERROR;

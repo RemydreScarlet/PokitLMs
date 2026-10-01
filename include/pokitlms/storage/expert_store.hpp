@@ -40,6 +40,8 @@ public:
     [[nodiscard]] std::size_t cache_capacity_bytes() const;
     [[nodiscard]] std::size_t cache_bytes() const;
     [[nodiscard]] std::uint64_t bytes_read_from_disk() const;
+    [[nodiscard]] std::uint64_t read_operations() const;
+    [[nodiscard]] std::uint64_t read_time_ns() const;
     [[nodiscard]] std::uint64_t cache_hits() const;
     [[nodiscard]] std::uint64_t cache_misses() const;
     void clear_cache();

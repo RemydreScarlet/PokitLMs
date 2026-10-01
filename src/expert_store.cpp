@@ -1,6 +1,7 @@
 #include "pokitlms/storage/expert_store.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <iterator>
 #include <limits>
 #include <list>
@@ -51,6 +52,8 @@ public:
     std::size_t capacity_bytes;
     std::size_t resident_bytes{};
     std::uint64_t disk_bytes{};
+    std::uint64_t reads{};
+    std::uint64_t read_nanoseconds{};
     std::uint64_t hits{};
     std::uint64_t misses{};
     mutable std::mutex mutex;
@@ -88,10 +91,15 @@ std::shared_ptr<const std::vector<std::byte>> ExpertStore::get(std::size_t exper
 
     const auto slice = impl_->experts[expert_id];
     auto bytes = std::make_shared<std::vector<std::byte>>(slice.size);
+    const auto read_start = std::chrono::steady_clock::now();
     impl_->file->read_into_uncached(slice.offset, *bytes);
+    const auto read_elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - read_start).count();
 
     std::lock_guard lock(impl_->mutex);
     impl_->disk_bytes += slice.size;
+    ++impl_->reads;
+    impl_->read_nanoseconds += static_cast<std::uint64_t>(read_elapsed);
     if (const auto found = impl_->lookup.find(expert_id); found != impl_->lookup.end()) {
         impl_->lru.splice(impl_->lru.begin(), impl_->lru, found->second);
         return found->second->second;
@@ -125,6 +133,18 @@ std::uint64_t ExpertStore::bytes_read_from_disk() const {
     if (!impl_) return 0;
     std::lock_guard lock(impl_->mutex);
     return impl_->disk_bytes;
+}
+
+std::uint64_t ExpertStore::read_operations() const {
+    if (!impl_) return 0;
+    std::lock_guard lock(impl_->mutex);
+    return impl_->reads;
+}
+
+std::uint64_t ExpertStore::read_time_ns() const {
+    if (!impl_) return 0;
+    std::lock_guard lock(impl_->mutex);
+    return impl_->read_nanoseconds;
 }
 
 std::uint64_t ExpertStore::cache_hits() const {

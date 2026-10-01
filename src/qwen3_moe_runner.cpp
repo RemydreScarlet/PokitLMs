@@ -438,6 +438,8 @@ public:
                 stats.capacity_bytes += store->cache_capacity_bytes();
                 stats.resident_bytes += store->cache_bytes();
                 stats.bytes_read += store->bytes_read_from_disk();
+                stats.read_operations += store->read_operations();
+                stats.read_time_ns += store->read_time_ns();
                 stats.hits += store->cache_hits();
                 stats.misses += store->cache_misses();
             }

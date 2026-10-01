@@ -27,6 +27,8 @@ struct ExpertCacheStats {
     std::size_t capacity_bytes{};
     std::size_t resident_bytes{};
     std::uint64_t bytes_read{};
+    std::uint64_t read_operations{};
+    std::uint64_t read_time_ns{};
     std::uint64_t hits{};
     std::uint64_t misses{};
 };
