@@ -514,6 +514,25 @@ std::string Qwen3MoeRunner::generate_text(std::string_view prompt, std::size_t m
     }
     return impl_->tokenizer.decode(printable);
 }
+std::string Qwen3MoeRunner::generate_chat(std::string_view user_message,
+                                          std::size_t max_new_tokens,
+                                          const GenerationOptions& options) {
+    if (!impl_) throw std::logic_error("Qwen3-MoE runner has been moved from");
+    std::string prompt;
+    prompt.reserve(user_message.size() + 64);
+    prompt = "<|im_start|>user\n";
+    prompt.append(user_message);
+    prompt += "<|im_end|>\n<|im_start|>assistant\n";
+    auto prompt_tokens = impl_->tokenizer.encode(prompt);
+    const auto generated = impl_->generate(prompt_tokens, max_new_tokens, options);
+    std::vector<std::uint32_t> printable;
+    printable.reserve(generated.size());
+    for (const auto token : generated) {
+        if (token == impl_->tokenizer.eos_token_id()) break;
+        printable.push_back(token);
+    }
+    return impl_->tokenizer.decode(printable);
+}
 void Qwen3MoeRunner::reset() { if (impl_) impl_->reset(); }
 const TransformerConfig& Qwen3MoeRunner::config() const noexcept {
     static const TransformerConfig empty{};

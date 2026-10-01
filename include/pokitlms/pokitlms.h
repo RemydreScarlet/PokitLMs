@@ -59,6 +59,14 @@ pokitlms_status pokitlms_model_generate_text(
     char* output, size_t output_capacity, size_t* output_length,
     char* error_buffer, size_t error_capacity);
 
+// Generates an assistant reply to one UTF-8 user message using Qwen3's
+// standard text chat format. Buffer and error semantics match generate_text.
+pokitlms_status pokitlms_model_generate_chat(
+    pokitlms_model* model, const char* user_message, size_t max_new_tokens,
+    const pokitlms_generation_options* options,
+    char* output, size_t output_capacity, size_t* output_length,
+    char* error_buffer, size_t error_capacity);
+
 pokitlms_status pokitlms_model_get_expert_cache_stats(
     const pokitlms_model* model, pokitlms_expert_cache_stats* out_stats);
 uint64_t pokitlms_model_bytes_read_from_disk(const pokitlms_model* model);

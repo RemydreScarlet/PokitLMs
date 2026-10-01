@@ -38,6 +38,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - One persistent storage worker prefetches the next routed expert while the CPU computes the current expert.
 - C API version function.
 - C ABI opaque Qwen3-MoE handle for creation, serialized text generation, and cache/storage telemetry.
+- Qwen3 single-message chat helper in the C++ and C APIs, including the standard user/assistant boundary tokens.
 - Model-specific chat-template handling, broader quantized format coverage, and optimized ARM kernels are not implemented yet. The decode path is currently compile-verified but has not been compared against a reference model output.
 
 ## Build

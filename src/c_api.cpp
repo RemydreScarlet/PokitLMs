@@ -103,6 +103,40 @@ pokitlms_status pokitlms_model_generate_text(
     }
 }
 
+pokitlms_status pokitlms_model_generate_chat(
+    pokitlms_model* model, const char* user_message, size_t max_new_tokens,
+    const pokitlms_generation_options* options,
+    char* output, size_t output_capacity, size_t* output_length,
+    char* error_buffer, size_t error_capacity) {
+    if (output_length) *output_length = 0;
+    if (!model || !user_message || !output_length) {
+        set_error(error_buffer, error_capacity, "model, user message, and output length are required");
+        return POKITLMS_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+        const auto text = model->runner.generate_chat(user_message, max_new_tokens,
+                                                       convert_options(options));
+        *output_length = text.size();
+        if (!output || output_capacity <= text.size()) {
+            set_error(error_buffer, error_capacity, "output buffer must fit generated text and a NUL byte");
+            return POKITLMS_STATUS_BUFFER_TOO_SMALL;
+        }
+        std::memcpy(output, text.data(), text.size());
+        output[text.size()] = '\0';
+        set_error(error_buffer, error_capacity, "");
+        return POKITLMS_STATUS_OK;
+    } catch (const std::invalid_argument& error) {
+        set_error(error_buffer, error_capacity, error.what());
+        return POKITLMS_STATUS_INVALID_ARGUMENT;
+    } catch (const std::exception& error) {
+        set_error(error_buffer, error_capacity, error.what());
+        return POKITLMS_STATUS_RUNTIME_ERROR;
+    } catch (...) {
+        set_error(error_buffer, error_capacity, "unknown chat generation failure");
+        return POKITLMS_STATUS_INTERNAL_ERROR;
+    }
+}
+
 pokitlms_status pokitlms_model_get_expert_cache_stats(
     const pokitlms_model* model, pokitlms_expert_cache_stats* out_stats) {
     if (!model || !out_stats) return POKITLMS_STATUS_INVALID_ARGUMENT;

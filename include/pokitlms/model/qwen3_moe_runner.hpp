@@ -57,6 +57,11 @@ public:
     [[nodiscard]] std::string generate_text(
         std::string_view prompt, std::size_t max_new_tokens,
         const GenerationOptions& options = {});
+    // Formats a single user message with Qwen3's standard text chat markers,
+    // generates an assistant reply, and removes any generated end markers.
+    [[nodiscard]] std::string generate_chat(
+        std::string_view user_message, std::size_t max_new_tokens,
+        const GenerationOptions& options = {});
     void reset();
     [[nodiscard]] const TransformerConfig& config() const noexcept;
     [[nodiscard]] std::uint64_t bytes_read_from_disk() const noexcept;
