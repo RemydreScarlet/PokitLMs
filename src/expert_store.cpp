@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <future>
 #include <iterator>
 #include <limits>
 #include <list>
@@ -60,6 +61,8 @@ public:
     using Entry = std::pair<std::size_t, std::shared_ptr<const std::vector<std::byte>>>;
     std::list<Entry> lru;
     std::unordered_map<std::size_t, std::list<Entry>::iterator> lookup;
+    std::unordered_map<std::size_t,
+        std::shared_future<std::shared_ptr<const std::vector<std::byte>>>> in_flight;
 };
 
 ExpertStore::ExpertStore(std::filesystem::path path, std::vector<ExpertSlice> experts,
@@ -79,6 +82,8 @@ std::shared_ptr<const std::vector<std::byte>> ExpertStore::get(std::size_t exper
     if (!impl_) throw std::logic_error("expert store has been moved from");
     if (expert_id >= impl_->experts.size()) throw std::out_of_range("expert id out of range");
 
+    std::shared_ptr<std::promise<std::shared_ptr<const std::vector<std::byte>>>> loader;
+    std::shared_future<std::shared_ptr<const std::vector<std::byte>>> pending;
     {
         std::lock_guard lock(impl_->mutex);
         if (const auto found = impl_->lookup.find(expert_id); found != impl_->lookup.end()) {
@@ -87,36 +92,52 @@ std::shared_ptr<const std::vector<std::byte>> ExpertStore::get(std::size_t exper
             return found->second->second;
         }
         ++impl_->misses;
+        if (const auto found = impl_->in_flight.find(expert_id); found != impl_->in_flight.end()) {
+            pending = found->second;
+        } else {
+            loader = std::make_shared<std::promise<std::shared_ptr<const std::vector<std::byte>>>>();
+            pending = loader->get_future().share();
+            impl_->in_flight.emplace(expert_id, pending);
+        }
     }
+    if (!loader) return pending.get();
 
     const auto slice = impl_->experts[expert_id];
-    auto bytes = std::make_shared<std::vector<std::byte>>(slice.size);
-    const auto read_start = std::chrono::steady_clock::now();
-    impl_->file->read_into_uncached(slice.offset, *bytes);
-    const auto read_elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now() - read_start).count();
+    try {
+        auto bytes = std::make_shared<std::vector<std::byte>>(slice.size);
+        const auto read_start = std::chrono::steady_clock::now();
+        impl_->file->read_into_uncached(slice.offset, *bytes);
+        const auto read_elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - read_start).count();
 
-    std::lock_guard lock(impl_->mutex);
-    impl_->disk_bytes += slice.size;
-    ++impl_->reads;
-    impl_->read_nanoseconds += static_cast<std::uint64_t>(read_elapsed);
-    if (const auto found = impl_->lookup.find(expert_id); found != impl_->lookup.end()) {
-        impl_->lru.splice(impl_->lru.begin(), impl_->lru, found->second);
-        return found->second->second;
-    }
-    if (slice.size <= impl_->capacity_bytes) {
-        while (impl_->resident_bytes > impl_->capacity_bytes - slice.size &&
-               !impl_->lru.empty()) {
-            const auto last = std::prev(impl_->lru.end());
-            impl_->resident_bytes -= last->second->size();
-            impl_->lookup.erase(last->first);
-            impl_->lru.erase(last);
+        std::shared_ptr<const std::vector<std::byte>> result = bytes;
+        {
+            std::lock_guard lock(impl_->mutex);
+            impl_->disk_bytes += slice.size;
+            ++impl_->reads;
+            impl_->read_nanoseconds += static_cast<std::uint64_t>(read_elapsed);
+            if (slice.size <= impl_->capacity_bytes) {
+                while (impl_->resident_bytes > impl_->capacity_bytes - slice.size &&
+                       !impl_->lru.empty()) {
+                    const auto last = std::prev(impl_->lru.end());
+                    impl_->resident_bytes -= last->second->size();
+                    impl_->lookup.erase(last->first);
+                    impl_->lru.erase(last);
+                }
+                impl_->lru.emplace_front(expert_id, result);
+                impl_->lookup[expert_id] = impl_->lru.begin();
+                impl_->resident_bytes += slice.size;
+            }
+            loader->set_value(result);
+            impl_->in_flight.erase(expert_id);
         }
-        impl_->lru.emplace_front(expert_id, bytes);
-        impl_->lookup[expert_id] = impl_->lru.begin();
-        impl_->resident_bytes += slice.size;
+        return result;
+    } catch (...) {
+        std::lock_guard lock(impl_->mutex);
+        loader->set_exception(std::current_exception());
+        impl_->in_flight.erase(expert_id);
+        throw;
     }
-    return bytes;
 }
 
 std::size_t ExpertStore::cache_capacity_bytes() const {
