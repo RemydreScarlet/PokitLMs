@@ -36,7 +36,7 @@ pokitlms::model::GenerationOptions convert_options(const pokitlms_generation_opt
 }  // namespace
 
 const char* pokitlms_version(void) {
-    return "0.2.0";
+    return "0.3.0";
 }
 
 void pokitlms_generation_options_init(pokitlms_generation_options* options) {
@@ -133,6 +133,49 @@ pokitlms_status pokitlms_model_generate_chat(
         return POKITLMS_STATUS_RUNTIME_ERROR;
     } catch (...) {
         set_error(error_buffer, error_capacity, "unknown chat generation failure");
+        return POKITLMS_STATUS_INTERNAL_ERROR;
+    }
+}
+
+pokitlms_status pokitlms_model_generate_chat_history(
+    pokitlms_model* model, const pokitlms_chat_message* messages, size_t message_count,
+    size_t max_new_tokens, const pokitlms_generation_options* options,
+    char* output, size_t output_capacity, size_t* output_length,
+    char* error_buffer, size_t error_capacity) {
+    if (output_length) *output_length = 0;
+    if (!model || !messages || message_count == 0 || !output_length) {
+        set_error(error_buffer, error_capacity, "model, chat messages, and output length are required");
+        return POKITLMS_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+        std::vector<pokitlms::model::ChatMessage> history;
+        history.reserve(message_count);
+        for (size_t i = 0; i < message_count; ++i) {
+            if (!messages[i].role || !messages[i].content) {
+                set_error(error_buffer, error_capacity, "chat message roles and contents cannot be null");
+                return POKITLMS_STATUS_INVALID_ARGUMENT;
+            }
+            history.push_back({messages[i].role, messages[i].content});
+        }
+        const auto text = model->runner.generate_chat(history, max_new_tokens,
+                                                       convert_options(options));
+        *output_length = text.size();
+        if (!output || output_capacity <= text.size()) {
+            set_error(error_buffer, error_capacity, "output buffer must fit generated text and a NUL byte");
+            return POKITLMS_STATUS_BUFFER_TOO_SMALL;
+        }
+        std::memcpy(output, text.data(), text.size());
+        output[text.size()] = '\0';
+        set_error(error_buffer, error_capacity, "");
+        return POKITLMS_STATUS_OK;
+    } catch (const std::invalid_argument& error) {
+        set_error(error_buffer, error_capacity, error.what());
+        return POKITLMS_STATUS_INVALID_ARGUMENT;
+    } catch (const std::exception& error) {
+        set_error(error_buffer, error_capacity, error.what());
+        return POKITLMS_STATUS_RUNTIME_ERROR;
+    } catch (...) {
+        set_error(error_buffer, error_capacity, "unknown chat history generation failure");
         return POKITLMS_STATUS_INTERNAL_ERROR;
     }
 }

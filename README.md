@@ -42,7 +42,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Four persistent I/O workers load an expert's gate/up/down slices concurrently and prefetch the next routed expert while the CPU computes the current expert.
 - C API version function.
 - C ABI opaque Qwen3-MoE handle for creation, serialized text generation, and cache/storage telemetry.
-- Qwen3 single-message chat helper in the C++ and C APIs, including the standard user/assistant boundary tokens.
+- Qwen3 chat helpers for single messages and multi-turn system/user/assistant history in the C++ and C APIs.
 - Multi-turn chat-template handling, broader quantized format coverage, and optimized ARM kernels are still incomplete. The decode path is compile-verified but has not been compared against a reference model output.
 
 ## Build

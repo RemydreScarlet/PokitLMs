@@ -29,6 +29,11 @@ struct GenerationStats {
     std::size_t generated_tokens{};
 };
 
+struct ChatMessage {
+    std::string_view role;
+    std::string_view content;
+};
+
 struct ExpertCacheStats {
     std::size_t capacity_bytes{};
     std::size_t resident_bytes{};
@@ -69,6 +74,11 @@ public:
     // generates an assistant reply, and removes any generated end markers.
     [[nodiscard]] std::string generate_chat(
         std::string_view user_message, std::size_t max_new_tokens,
+        const GenerationOptions& options = {});
+    // Formats a conversation of system/user/assistant messages. The history is
+    // prefetched from the beginning for each call; the final message must be user.
+    [[nodiscard]] std::string generate_chat(
+        std::span<const ChatMessage> messages, std::size_t max_new_tokens,
         const GenerationOptions& options = {});
     void reset();
     [[nodiscard]] const TransformerConfig& config() const noexcept;

@@ -617,12 +617,63 @@ std::string Qwen3MoeRunner::generate_text(std::string_view prompt, std::size_t m
 std::string Qwen3MoeRunner::generate_chat(std::string_view user_message,
                                           std::size_t max_new_tokens,
                                           const GenerationOptions& options) {
+    const ChatMessage message{"user", user_message};
+    return generate_chat(std::span<const ChatMessage>(&message, 1), max_new_tokens, options);
+}
+std::string Qwen3MoeRunner::generate_chat(std::span<const ChatMessage> messages,
+                                          std::size_t max_new_tokens,
+                                          const GenerationOptions& options) {
     if (!impl_) throw std::logic_error("Qwen3-MoE runner has been moved from");
+    if (messages.empty()) throw std::invalid_argument("chat history must contain at least one message");
     std::string prompt;
-    prompt.reserve(user_message.size() + 64);
-    prompt = "<|im_start|>user\n";
-    prompt.append(user_message);
-    prompt += "<|im_end|>\n<|im_start|>assistant\n";
+    std::string_view previous_role;
+    std::size_t content_bytes = 0;
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+        const auto& message = messages[i];
+        const bool is_system = message.role == "system";
+        const bool is_user = message.role == "user";
+        const bool is_assistant = message.role == "assistant";
+        if (!is_system && !is_user && !is_assistant) {
+            throw std::invalid_argument("chat role must be system, user, or assistant");
+        }
+        if (i == 0) {
+            if (!is_system && !is_user) {
+                throw std::invalid_argument("chat history must begin with a system or user message");
+            }
+        } else if (is_system) {
+            throw std::invalid_argument("system message is only allowed at the start of chat history");
+        } else if (previous_role == "system") {
+            if (!is_user) throw std::invalid_argument("a system message must be followed by a user message");
+        } else if ((previous_role == "user" && !is_assistant) ||
+                   (previous_role == "assistant" && !is_user)) {
+            throw std::invalid_argument("chat user and assistant messages must alternate");
+        }
+        if (message.content.size() > std::numeric_limits<std::size_t>::max() - content_bytes) {
+            throw std::length_error("chat history is too large");
+        }
+        content_bytes += message.content.size();
+        previous_role = message.role;
+    }
+    if (previous_role != "user") {
+        throw std::invalid_argument("chat history must end with a user message");
+    }
+    constexpr std::size_t message_overhead = 32;
+    if (messages.size() > (std::numeric_limits<std::size_t>::max() - 24) / message_overhead) {
+        throw std::length_error("chat history is too large");
+    }
+    const auto prompt_overhead = messages.size() * message_overhead + 24;
+    if (content_bytes > std::numeric_limits<std::size_t>::max() - prompt_overhead) {
+        throw std::length_error("chat history is too large");
+    }
+    prompt.reserve(content_bytes + prompt_overhead);
+    for (const auto& message : messages) {
+        prompt += "<|im_start|>";
+        prompt.append(message.role);
+        prompt.push_back('\n');
+        prompt.append(message.content);
+        prompt += "<|im_end|>\n";
+    }
+    prompt += "<|im_start|>assistant\n";
     auto prompt_tokens = impl_->tokenizer.encode(prompt);
     const auto generated = impl_->generate(prompt_tokens, max_new_tokens, options);
     std::vector<std::uint32_t> printable;

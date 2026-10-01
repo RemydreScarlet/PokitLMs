@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 #define POKITLMS_VERSION_MAJOR 0
-#define POKITLMS_VERSION_MINOR 2
+#define POKITLMS_VERSION_MINOR 3
 #define POKITLMS_VERSION_PATCH 0
 
 const char* pokitlms_version(void);
@@ -43,6 +43,11 @@ typedef struct pokitlms_expert_cache_stats {
     uint64_t misses;
 } pokitlms_expert_cache_stats;
 
+typedef struct pokitlms_chat_message {
+    const char* role;    // "system", "user", or "assistant".
+    const char* content; // UTF-8 message content.
+} pokitlms_chat_message;
+
 // Creates a single-sequence Qwen3-MoE model handle. context_capacity sets the
 // resident KV window (older positions roll out); zero selects the mobile default.
 // Error text, when provided, is truncated and NUL-terminated.
@@ -67,6 +72,15 @@ pokitlms_status pokitlms_model_generate_text(
 pokitlms_status pokitlms_model_generate_chat(
     pokitlms_model* model, const char* user_message, size_t max_new_tokens,
     const pokitlms_generation_options* options,
+    char* output, size_t output_capacity, size_t* output_length,
+    char* error_buffer, size_t error_capacity);
+
+// Generates a reply from a system/user/assistant history. Messages must
+// alternate user and assistant after an optional leading system message, and
+// the final message must be from the user. The history is re-prefilled each call.
+pokitlms_status pokitlms_model_generate_chat_history(
+    pokitlms_model* model, const pokitlms_chat_message* messages, size_t message_count,
+    size_t max_new_tokens, const pokitlms_generation_options* options,
     char* output, size_t output_capacity, size_t* output_length,
     char* error_buffer, size_t error_capacity);
 
