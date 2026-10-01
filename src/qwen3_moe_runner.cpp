@@ -118,6 +118,7 @@ void apply_qwen_rope(std::span<float> values, std::size_t head_dimension,
 
 struct Route {
     std::size_t id;
+    float logit;
     float probability;
 };
 
@@ -205,26 +206,32 @@ std::vector<Route> route_experts(std::span<const float> logits, std::size_t top_
     }
     double denominator = 0.0;
     for (const auto value : logits) denominator += std::exp(static_cast<double>(value - *max_it));
-    std::vector<std::size_t> ids(logits.size());
-    for (std::size_t i = 0; i < ids.size(); ++i) ids[i] = i;
-    std::partial_sort(ids.begin(), ids.begin() + static_cast<std::ptrdiff_t>(top_k), ids.end(),
-        [&logits](std::size_t lhs, std::size_t rhs) {
-            return logits[lhs] > logits[rhs] || (logits[lhs] == logits[rhs] && lhs < rhs);
-        });
-    std::vector<Route> routes;
-    routes.reserve(top_k);
+    std::vector<Route> selected;
+    selected.reserve(top_k);
+    for (std::size_t id = 0; id < logits.size(); ++id) {
+        const Route candidate{id, logits[id], 0.0F};
+        const auto where = std::lower_bound(selected.begin(), selected.end(), candidate,
+            [](const Route& lhs, const Route& rhs) {
+                return lhs.logit > rhs.logit ||
+                       (lhs.logit == rhs.logit && lhs.id < rhs.id);
+            });
+        if (selected.size() < top_k) selected.insert(where, candidate);
+        else if (where != selected.end()) {
+            selected.insert(where, candidate);
+            selected.pop_back();
+        }
+    }
     float selected_sum = 0.0F;
     for (std::size_t i = 0; i < top_k; ++i) {
-        const auto id = ids[i];
-        const float probability = static_cast<float>(std::exp(
+        const auto id = selected[i].id;
+        selected[i].probability = static_cast<float>(std::exp(
             static_cast<double>(logits[id] - *max_it)) / denominator);
-        routes.push_back({id, probability});
-        selected_sum += probability;
+        selected_sum += selected[i].probability;
     }
     if (normalize_top_k) {
-        for (auto& route : routes) route.probability /= selected_sum;
+        for (auto& route : selected) route.probability /= selected_sum;
     }
-    return routes;
+    return selected;
 }
 
 std::uint32_t sample_token(std::span<const float> logits,
@@ -323,7 +330,6 @@ public:
         if (layer_count > std::numeric_limits<std::size_t>::max() / 3) {
             throw std::invalid_argument("model has too many layers for expert cache accounting");
         }
-        std::vector<std::array<std::vector<storage::ExpertSlice>, 3>> expert_slices;
         std::vector<std::size_t> expert_slice_sizes;
         expert_slices.reserve(layer_count);
         expert_slice_sizes.reserve(layer_count * 3);
@@ -358,11 +364,11 @@ public:
             kv_caches.emplace_back(context_capacity, kv_heads, key_dim, value_dim,
                                    kv_precision);
             gate_stores.push_back(std::make_unique<storage::ExpertStore>(
-                file, std::move(expert_slices[layer][0]), cache_capacities[layer * 3]));
+                file, expert_slices[layer][0], cache_capacities[layer * 3]));
             up_stores.push_back(std::make_unique<storage::ExpertStore>(
-                file, std::move(expert_slices[layer][1]), cache_capacities[layer * 3 + 1]));
+                file, expert_slices[layer][1], cache_capacities[layer * 3 + 1]));
             down_stores.push_back(std::make_unique<storage::ExpertStore>(
-                file, std::move(expert_slices[layer][2]), cache_capacities[layer * 3 + 2]));
+                file, expert_slices[layer][2], cache_capacities[layer * 3 + 2]));
         }
         output_norm = load_vector(file, index.output_norm());
         next_position = 0;
@@ -382,6 +388,7 @@ public:
     std::vector<std::vector<float>> key_norms;
     std::vector<std::vector<float>> feed_forward_norms;
     std::vector<KvCache> kv_caches;
+    std::vector<std::array<std::vector<storage::ExpertSlice>, 3>> expert_slices;
     std::vector<std::unique_ptr<storage::ExpertStore>> gate_stores;
     std::vector<std::unique_ptr<storage::ExpertStore>> up_stores;
     std::vector<std::unique_ptr<storage::ExpertStore>> down_stores;
@@ -460,9 +467,9 @@ public:
                 std::vector<float> moe_result(hidden_size, 0.0F);
                 const auto intermediate = as_size(config.expert_feed_forward_length,
                                                   "expert_feed_forward_length");
-                const auto gate_slices = storage::split_expert_tensor(block.expert_gate, expert_count);
-                const auto up_slices = storage::split_expert_tensor(block.expert_up, expert_count);
-                const auto down_slices = storage::split_expert_tensor(block.expert_down, expert_count);
+                const auto& gate_slices = expert_slices[layer][0];
+                const auto& up_slices = expert_slices[layer][1];
+                const auto& down_slices = expert_slices[layer][2];
                 const auto load_expert = [this, layer](std::size_t expert_id) {
                     auto gate = expert_loader.submit([this, layer, expert_id] {
                         return gate_stores[layer]->get(expert_id);
