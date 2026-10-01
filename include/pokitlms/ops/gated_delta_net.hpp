@@ -23,4 +23,14 @@ void gated_delta_recurrent_step(
     std::size_t heads, std::size_t key_dimension, std::size_t value_dimension,
     float* state, float* output, GatedDeltaNetScratch& scratch);
 
+// Qwen3.5 may use fewer key/query heads than value heads. Each value head
+// shares one key/query head with its contiguous repeat group; recurrent state
+// and decay/update gates remain per value head.
+void gated_delta_recurrent_step_grouped(
+    const float* query, const float* key, const float* value,
+    const float* log_decay, const float* beta,
+    std::size_t key_heads, std::size_t value_heads,
+    std::size_t key_dimension, std::size_t value_dimension,
+    float* state, float* output, GatedDeltaNetScratch& scratch);
+
 }  // namespace pokitlms

@@ -21,17 +21,28 @@ void gated_delta_recurrent_step(
     const float* log_decay, const float* beta,
     std::size_t heads, std::size_t key_dimension, std::size_t value_dimension,
     float* state, float* output, GatedDeltaNetScratch& scratch) {
+    gated_delta_recurrent_step_grouped(query, key, value, log_decay, beta,
+        heads, heads, key_dimension, value_dimension, state, output, scratch);
+}
+
+void gated_delta_recurrent_step_grouped(
+    const float* query, const float* key, const float* value,
+    const float* log_decay, const float* beta,
+    std::size_t key_heads, std::size_t value_heads,
+    std::size_t key_dimension, std::size_t value_dimension,
+    float* state, float* output, GatedDeltaNetScratch& scratch) {
     if (!query || !key || !value || !log_decay || !beta || !state || !output ||
-        heads == 0 || key_dimension == 0 || value_dimension == 0) {
+        key_heads == 0 || value_heads == 0 || key_dimension == 0 || value_dimension == 0 ||
+        value_heads % key_heads != 0) {
         throw std::invalid_argument("invalid gated-delta step dimensions or buffers");
     }
-    const auto qk_count = checked_product(heads, key_dimension);
-    const auto value_count = checked_product(heads, value_dimension);
+    const auto qk_count = checked_product(key_heads, key_dimension);
+    const auto value_count = checked_product(value_heads, value_dimension);
     const auto state_head_size = checked_product(key_dimension, value_dimension);
-    const auto state_count = checked_product(heads, state_head_size);
+    const auto state_count = checked_product(value_heads, state_head_size);
     (void)value_count;
     (void)state_count;
-    for (std::size_t head = 0; head < heads; ++head) {
+    for (std::size_t head = 0; head < value_heads; ++head) {
         if (!std::isfinite(log_decay[head]) || log_decay[head] > 0.0F ||
             !std::isfinite(beta[head]) || beta[head] < 0.0F || beta[head] > 1.0F) {
             throw std::invalid_argument("invalid gated-delta decay or update gate");
@@ -42,8 +53,9 @@ void gated_delta_recurrent_step(
     scratch.delta.resize(value_count);
 
     constexpr float norm_epsilon = 1.0e-6F;
+    const auto key_head_repeat = value_heads / key_heads;
     const float query_scale = 1.0F / std::sqrt(static_cast<float>(key_dimension));
-    for (std::size_t head = 0; head < heads; ++head) {
+    for (std::size_t head = 0; head < key_heads; ++head) {
         const auto q_offset = head * key_dimension;
         float query_square_sum = 0.0F;
         float key_square_sum = 0.0F;
@@ -59,13 +71,19 @@ void gated_delta_recurrent_step(
             scratch.normalized_key[q_offset + i] = key[q_offset + i] * key_inverse_norm;
         }
 
+    }
+
+    for (std::size_t head = 0; head < value_heads; ++head) {
+        const auto key_head = head / key_head_repeat;
+        const auto q_offset = key_head * key_dimension;
+        const auto value_offset = head * value_dimension;
         const auto state_offset = head * state_head_size;
         const float decay = std::exp(log_decay[head]);
         for (std::size_t i = 0; i < state_head_size; ++i) {
             state[state_offset + i] *= decay;
         }
 
-        const auto delta_offset = head * value_dimension;
+        const auto delta_offset = value_offset;
         for (std::size_t v = 0; v < value_dimension; ++v) {
             float memory = 0.0F;
             for (std::size_t k = 0; k < key_dimension; ++k) {

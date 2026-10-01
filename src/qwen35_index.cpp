@@ -161,6 +161,14 @@ std::uint64_t Qwen35Config::linear_key_dimension() const noexcept {
     return ssm_group_count * ssm_state_size;
 }
 
+std::uint64_t Qwen35Config::linear_key_head_count() const noexcept {
+    return ssm_group_count;
+}
+
+std::uint64_t Qwen35Config::linear_key_head_dimension() const noexcept {
+    return ssm_state_size;
+}
+
 std::uint64_t Qwen35Config::linear_value_head_dimension() const noexcept {
     return ssm_inner_size / ssm_time_step_rank;
 }

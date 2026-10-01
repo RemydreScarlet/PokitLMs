@@ -31,6 +31,8 @@ struct Qwen35Config {
 
     [[nodiscard]] bool is_full_attention_layer(std::uint64_t layer) const noexcept;
     [[nodiscard]] std::uint64_t linear_key_dimension() const noexcept;
+    [[nodiscard]] std::uint64_t linear_key_head_count() const noexcept;
+    [[nodiscard]] std::uint64_t linear_key_head_dimension() const noexcept;
     [[nodiscard]] std::uint64_t linear_value_head_dimension() const noexcept;
     [[nodiscard]] std::uint64_t linear_value_head_count() const noexcept;
 };
