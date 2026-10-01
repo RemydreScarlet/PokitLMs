@@ -15,6 +15,7 @@ add_library(pokitlms
     src/gguf_reader.cpp
     src/architecture.cpp
     src/kv_cache.cpp
+    src/qwen3_moe_index.cpp
     src/c_api.cpp
 )
 

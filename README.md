@@ -22,10 +22,11 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - GGUF v3 metadata/tensor-directory reader with known-format payload extent validation; payloads remain file-backed.
 - Expert tensor splitting by the GGUF last dimension, ready to feed routed slices into the bounded store.
 - Validated GGUF architecture parameters for Qwen3-MoE (`qwen3moe`); this is metadata support, not a complete model executor.
+- Qwen3-MoE tensor-name/shape index for the model's base, attention, router, and expert tensors.
 - Streaming MoE routing callback that selects only the top-k expert IDs with O(top-k) routing memory.
 - Fixed-capacity ring-buffer KV cache and numerically stable grouped-query causal attention primitive.
 - C API version function.
-- Tokenizer, quantized kernels, architecture-specific model graph, and end-to-end generation are not implemented yet.
+- Tokenizer, additional quantized kernels, architecture execution graph, and end-to-end generation are not implemented yet.
 
 ## Build
 
