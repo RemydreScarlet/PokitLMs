@@ -309,7 +309,8 @@ public:
     std::vector<std::unique_ptr<storage::ExpertStore>> down_stores;
     ExpertLoader expert_loader;
 
-    std::vector<float> forward(std::uint32_t token_id, std::uint64_t position) {
+    std::vector<float> forward(std::uint32_t token_id, std::uint64_t position,
+                               bool calculate_logits = true) {
         const auto& config = index.config();
         if (token_id >= index.vocabulary_size()) throw std::out_of_range("token id exceeds model vocabulary");
         if (position != next_position || position >= context_capacity) {
@@ -410,11 +411,12 @@ public:
                 }
                 for (std::size_t i = 0; i < hidden_size; ++i) hidden[i] += moe_result[i];
             }
+            ++next_position;
+            if (!calculate_logits) return {};
             std::vector<float> final_hidden(hidden_size);
             rms_norm(hidden, output_norm, final_hidden, epsilon);
             std::vector<float> logits(as_size(index.vocabulary_size(), "vocabulary_size"));
             tensor_linear(TensorReader(file, index.output()), final_hidden, logits);
-            ++next_position;
             return logits;
         } catch (...) {
             for (auto& cache : kv_caches) cache.clear();
@@ -459,7 +461,7 @@ public:
         std::vector<float> logits;
         try {
             for (std::size_t i = 0; i < prompt.size(); ++i) {
-                logits = forward(prompt[i], i);
+                logits = forward(prompt[i], i, i + 1 == prompt.size());
             }
             std::mt19937_64 random(options.seed);
             generated.reserve(max_new_tokens);
@@ -491,7 +493,7 @@ Qwen3MoeRunner& Qwen3MoeRunner::operator=(Qwen3MoeRunner&&) noexcept = default;
 
 std::vector<float> Qwen3MoeRunner::forward_token(std::uint32_t token_id, std::uint64_t position) {
     if (!impl_) throw std::logic_error("Qwen3-MoE runner has been moved from");
-    return impl_->forward(token_id, position);
+    return impl_->forward(token_id, position, true);
 }
 std::vector<std::uint32_t> Qwen3MoeRunner::generate_tokens(
     std::span<const std::uint32_t> prompt, std::size_t max_new_tokens,

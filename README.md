@@ -25,6 +25,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - AArch64 NEON dot-product and weighted-accumulation paths for dense F32, quantized blocks, and grouped-query attention; scalar fallback remains portable.
 - Single-token Qwen3-MoE decode path with per-layer GQA KV state, Q/K RMSNorm, RoPE, top-k routing, and cached on-demand expert execution.
 - Tokenizer-backed multi-token generation with greedy or temperature sampling, top-k/top-p filtering, repetition penalty, and EOS stopping.
+- Prompt prefill skips vocabulary logits for all but the final prompt token, avoiding repeated output-matrix reads.
 - GGUF v3 metadata/tensor-directory reader with known-format payload extent validation; payloads remain file-backed.
 - Expert tensor splitting by the GGUF last dimension, ready to feed routed slices into the bounded store.
 - Validated GGUF architecture parameters and tensor index for Qwen3-MoE (`qwen3moe`); the token executor is still awaiting comparison with a reference model.
