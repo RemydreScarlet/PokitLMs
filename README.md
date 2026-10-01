@@ -47,6 +47,17 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
+Build the native ARM64 Android backend with an installed NDK:
+
+```bash
+cmake -S . -B build-android-arm64 \
+  -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" \
+  -DANDROID_ABI=arm64-v8a \
+  -DANDROID_PLATFORM=android-24 \
+  -DPOKITLMS_BUILD_TESTS=OFF
+cmake --build build-android-arm64 -j
+```
+
 ## Near-term backend work
 
 1. Cross-build and compare tokenizer, Qwen3-MoE decode, and each quantized format against reference outputs.
