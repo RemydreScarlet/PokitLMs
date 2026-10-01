@@ -312,9 +312,10 @@ std::uint32_t sample_token(std::span<const float> logits,
 class Qwen3MoeRunner::Impl {
 public:
     Impl(std::filesystem::path path, std::size_t cache_budget, std::size_t requested_context,
-         KvCachePrecision kv_precision)
+        KvCachePrecision kv_precision)
         : model_path(std::move(path)), gguf(model_path),
-          file(std::make_shared<storage::ModelFile>(model_path)), index(gguf), tokenizer(gguf) {
+          file(std::make_shared<storage::ModelFile>(model_path)), index(gguf), tokenizer(gguf),
+          embedding_reader(file, index.token_embedding()) {
         const auto& config = index.config();
         model_context = as_size(config.context_length, "context_length");
         // Keep KV residency bounded for mobile devices. The ring retains the most
@@ -332,6 +333,8 @@ public:
         const auto intermediate_size = as_size(config.expert_feed_forward_length,
                                                 "expert_feed_forward_length");
         const auto expert_count = as_size(config.expert_count, "expert_count");
+        scratch.hidden.resize(hidden_size);
+        scratch.embedding_bytes.resize(embedding_reader.row_bytes());
         scratch.normalized.resize(hidden_size);
         scratch.query.resize(query_heads * key_dim);
         scratch.key.resize(kv_heads * key_dim);
@@ -396,6 +399,7 @@ public:
     std::shared_ptr<storage::ModelFile> file;
     Qwen3MoeIndex index;
     QwenBpeTokenizer tokenizer;
+    TensorReader embedding_reader;
     std::size_t model_context{};
     std::size_t context_capacity{};
     std::uint64_t next_position{};
@@ -410,6 +414,8 @@ public:
     std::vector<std::unique_ptr<storage::ExpertStore>> up_stores;
     std::vector<std::unique_ptr<storage::ExpertStore>> down_stores;
     struct ForwardScratch {
+        std::vector<float> hidden;
+        std::vector<std::byte> embedding_bytes;
         std::vector<float> normalized;
         std::vector<float> query;
         std::vector<float> key;
@@ -442,15 +448,15 @@ public:
             throw std::invalid_argument("token position is not the next position in this decode state");
         }
         try {
-            TensorReader embeddings(file, index.token_embedding());
-            std::vector<float> hidden;
+            auto& hidden = scratch.hidden;
             if (index.token_embedding().type == 0 || index.token_embedding().type == 1 ||
                 index.token_embedding().type == 30) {
-                hidden = embeddings.read_float_rows(token_id, 1);
+                embedding_reader.read_float_rows_into(token_id, 1, hidden,
+                                                       scratch.embedding_bytes);
             } else {
-                const auto encoded = embeddings.read_rows(token_id, 1);
-                hidden.resize(as_size(config.embedding_length, "embedding_length"));
-                dequantize_quantized_row(index.token_embedding().type, encoded, hidden);
+                embedding_reader.read_rows_into(token_id, 1, scratch.embedding_bytes);
+                dequantize_quantized_row(index.token_embedding().type,
+                                         scratch.embedding_bytes, hidden);
             }
             const auto hidden_size = hidden.size();
             const auto query_heads = as_size(config.attention_heads, "attention_heads");

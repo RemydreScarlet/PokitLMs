@@ -20,8 +20,13 @@ public:
     [[nodiscard]] const TensorInfo& tensor() const noexcept;
     [[nodiscard]] std::uint64_t row_count() const noexcept;
     [[nodiscard]] std::size_t row_bytes() const noexcept;
+    void read_rows_into(std::uint64_t first_row, std::size_t row_count,
+                        std::span<std::byte> destination) const;
     [[nodiscard]] std::vector<std::byte> read_rows(std::uint64_t first_row,
                                                    std::size_t row_count) const;
+    void read_float_rows_into(std::uint64_t first_row, std::size_t row_count,
+                              std::span<float> destination,
+                              std::span<std::byte> encoded_scratch) const;
     [[nodiscard]] std::vector<float> read_float_rows(std::uint64_t first_row,
                                                      std::size_t row_count) const;
     [[nodiscard]] std::vector<std::byte> read_all() const;

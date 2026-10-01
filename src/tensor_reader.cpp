@@ -94,13 +94,17 @@ const TensorInfo& TensorReader::tensor() const noexcept { return tensor_; }
 std::uint64_t TensorReader::row_count() const noexcept { return row_count_; }
 std::size_t TensorReader::row_bytes() const noexcept { return row_bytes_; }
 
-std::vector<std::byte> TensorReader::read_rows(std::uint64_t first_row,
-                                              std::size_t rows) const {
+void TensorReader::read_rows_into(std::uint64_t first_row, std::size_t rows,
+                                  std::span<std::byte> destination) const {
     if (first_row > row_count_ || rows > row_count_ - first_row) {
         throw std::out_of_range("tensor row range is out of bounds");
     }
     if (rows != 0 && row_bytes_ > std::numeric_limits<std::size_t>::max() / rows) {
         throw std::length_error("tensor row read is too large");
+    }
+    const auto byte_count = row_bytes_ * rows;
+    if (destination.size() != byte_count) {
+        throw std::invalid_argument("tensor row destination has the wrong size");
     }
     if (row_bytes_ != 0 && first_row > std::numeric_limits<std::uint64_t>::max() / row_bytes_) {
         throw std::out_of_range("tensor row offset overflows");
@@ -110,15 +114,49 @@ std::vector<std::byte> TensorReader::read_rows(std::uint64_t first_row,
         throw std::out_of_range("tensor row offset overflows");
     }
     if (memory_) {
-        std::vector<std::byte> result(row_bytes_ * rows);
-        std::memcpy(result.data(), memory_->data() + static_cast<std::size_t>(byte_offset), result.size());
-        return result;
+        std::memcpy(destination.data(), memory_->data() + static_cast<std::size_t>(byte_offset),
+                    destination.size());
+        return;
     }
-    return file_->read(tensor_.file_offset + byte_offset, row_bytes_ * rows);
+    file_->read_into(tensor_.file_offset + byte_offset, destination);
+}
+
+std::vector<std::byte> TensorReader::read_rows(std::uint64_t first_row,
+                                              std::size_t rows) const {
+    if (first_row > row_count_ || rows > row_count_ - first_row) {
+        throw std::out_of_range("tensor row range is out of bounds");
+    }
+    if (rows != 0 && row_bytes_ > std::numeric_limits<std::size_t>::max() / rows) {
+        throw std::length_error("tensor row read is too large");
+    }
+    std::vector<std::byte> result(row_bytes_ * rows);
+    read_rows_into(first_row, rows, result);
+    return result;
 }
 
 std::vector<float> TensorReader::read_float_rows(std::uint64_t first_row,
                                                  std::size_t rows) const {
+    if (tensor_.type != 0 && tensor_.type != 1 && tensor_.type != 30) {
+        throw std::invalid_argument("float row access supports GGUF F32, F16, and BF16 tensors");
+    }
+    if (first_row > row_count_ || rows > row_count_ - first_row) {
+        throw std::out_of_range("tensor row range is out of bounds");
+    }
+    if (rows != 0 && tensor_.dimensions.front() > std::numeric_limits<std::size_t>::max() / rows) {
+        throw std::length_error("float tensor row read is too large");
+    }
+    if (rows != 0 && row_bytes_ > std::numeric_limits<std::size_t>::max() / rows) {
+        throw std::length_error("tensor row read is too large");
+    }
+    std::vector<float> values(static_cast<std::size_t>(tensor_.dimensions.front()) * rows);
+    std::vector<std::byte> encoded(row_bytes_ * rows);
+    read_float_rows_into(first_row, rows, values, encoded);
+    return values;
+}
+
+void TensorReader::read_float_rows_into(std::uint64_t first_row, std::size_t rows,
+                                        std::span<float> values,
+                                        std::span<std::byte> encoded) const {
     if (tensor_.type != 0 && tensor_.type != 1 && tensor_.type != 30) {
         throw std::invalid_argument("float row access supports GGUF F32, F16, and BF16 tensors");
     }
@@ -133,18 +171,19 @@ std::vector<float> TensorReader::read_float_rows(std::uint64_t first_row,
     if (rows != 0 && elements_per_row > std::numeric_limits<std::size_t>::max() / rows) {
         throw std::length_error("float tensor row read is too large");
     }
-    const auto bytes = read_rows(first_row, rows);
-    std::vector<float> values(static_cast<std::size_t>(elements_per_row) * rows);
+    if (values.size() != static_cast<std::size_t>(elements_per_row) * rows) {
+        throw std::invalid_argument("float tensor destination has the wrong size");
+    }
+    read_rows_into(first_row, rows, encoded);
     if (tensor_.type == 0) {
-        for (std::size_t i = 0; i < values.size(); ++i) values[i] = std::bit_cast<float>(read_u32(bytes.data() + i * 4));
+        for (std::size_t i = 0; i < values.size(); ++i) values[i] = std::bit_cast<float>(read_u32(encoded.data() + i * 4));
     } else if (tensor_.type == 30) {
         for (std::size_t i = 0; i < values.size(); ++i) {
-            values[i] = std::bit_cast<float>(static_cast<std::uint32_t>(read_u16(bytes.data() + i * 2)) << 16);
+            values[i] = std::bit_cast<float>(static_cast<std::uint32_t>(read_u16(encoded.data() + i * 2)) << 16);
         }
     } else {
-        for (std::size_t i = 0; i < values.size(); ++i) values[i] = half_to_float(read_u16(bytes.data() + i * 2));
+        for (std::size_t i = 0; i < values.size(); ++i) values[i] = half_to_float(read_u16(encoded.data() + i * 2));
     }
-    return values;
 }
 
 std::vector<std::byte> TensorReader::read_all() const {
