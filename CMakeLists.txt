@@ -14,6 +14,7 @@ add_library(pokitlms
     src/expert_store.cpp
     src/gguf_reader.cpp
     src/architecture.cpp
+    src/kv_cache.cpp
     src/c_api.cpp
 )
 
