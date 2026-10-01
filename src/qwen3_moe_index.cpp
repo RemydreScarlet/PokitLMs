@@ -39,8 +39,18 @@ Qwen3MoeIndex::Qwen3MoeIndex(const GgufReader& model)
     token_embedding_ = require_tensor(model, "token_embd.weight",
                                       {config_.embedding_length, vocabulary_size_});
     output_norm_ = require_tensor(model, "output_norm.weight", {config_.embedding_length});
-    output_ = require_tensor(model, "output.weight",
-                             {config_.embedding_length, vocabulary_size_});
+    if (const auto* output = model.find_tensor("output.weight")) {
+        if (output->dimensions != std::vector<std::uint64_t>{config_.embedding_length,
+                                                              vocabulary_size_} ||
+            !output->payload_size) {
+            throw std::runtime_error("unexpected dimensions or storage type for tensor: output.weight");
+        }
+        output_ = *output;
+    } else if (config_.tie_word_embeddings) {
+        output_ = token_embedding_;
+    } else {
+        throw std::runtime_error("missing Qwen3-MoE tensor: output.weight");
+    }
 
     const auto query_dimension = config_.attention_heads * config_.key_length;
     const auto key_dimension = config_.key_value_heads * config_.key_length;

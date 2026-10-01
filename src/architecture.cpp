@@ -84,6 +84,9 @@ TransformerConfig load_transformer_config(const GgufReader& model) {
     config.experts_per_token = require_u64(model, prefix + "expert_used_count");
     config.expert_feed_forward_length = require_u64(model, prefix + "expert_feed_forward_length");
     config.expert_weights_norm = optional_bool(model, prefix + "expert_weights_norm", false);
+    config.tie_word_embeddings = optional_bool(model, prefix + "tie_word_embeddings",
+                                                model.find_tensor("output.weight") == nullptr);
+    if (model.find_tensor("output.weight") == nullptr) config.tie_word_embeddings = true;
     config.rms_norm_epsilon = require_number(model, prefix + "attention.layer_norm_rms_epsilon");
     config.rope_frequency_base = require_number(model, prefix + "rope.freq_base");
 

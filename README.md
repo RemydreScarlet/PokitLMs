@@ -30,6 +30,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - GGUF v3 metadata/tensor-directory reader with known-format payload extent validation; payloads remain file-backed.
 - Expert tensor splitting by the GGUF last dimension, ready to feed routed slices into the bounded store.
 - Validated GGUF architecture parameters and tensor index for Qwen3-MoE (`qwen3moe`); the token executor is still awaiting comparison with a reference model.
+- Tied-output Qwen3-MoE GGUF support: when `output.weight` is absent, the runner reuses `token_embd.weight` for vocabulary projection.
 - Qwen3-MoE tensor-name/shape index for the model's base, attention, router, and expert tensors.
 - Qwen GPT-2 byte-level BPE encoder/decoder using GGUF vocabulary, merge, token-type, and special-token metadata.
 - Streaming MoE routing callback that selects only the top-k expert IDs with O(top-k) routing memory.
@@ -80,7 +81,7 @@ goes to stdout and the measurements go to stderr.
 ## Near-term backend work
 
 1. Cross-build and compare tokenizer, Qwen3-MoE decode, and each quantized format against reference outputs.
-2. Add model-specific prompt templates and tied-output model support.
+2. Add multi-turn model-specific prompt templates.
 3. Expand tensor-format coverage for common GGUF quantizations.
 4. Measure and tune the asynchronous storage lanes and cache policy on target ARM64 devices.
 5. Measure on target ARM64 devices before choosing cache defaults or adding platform-specific acceleration.
