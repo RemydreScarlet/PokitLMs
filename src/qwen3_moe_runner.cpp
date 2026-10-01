@@ -6,6 +6,7 @@
 #include "pokitlms/ops/kv_cache.hpp"
 #include "pokitlms/ops/quantized_linear.hpp"
 #include "pokitlms/ops/rms_norm.hpp"
+#include "simd_kernels.hpp"
 
 #include <algorithm>
 #include <array>
@@ -120,12 +121,7 @@ void apply_qwen_rope(std::span<float> values, std::size_t head_dimension,
     const auto half = rotary_dimension / 2;
     for (std::size_t head = 0; head < heads; ++head) {
         auto* vector = values.data() + head * head_dimension;
-        for (std::size_t pair = 0; pair < half; ++pair) {
-            const float first = vector[pair];
-            const float second = vector[pair + half];
-            vector[pair] = first * cosine[pair] - second * sine[pair];
-            vector[pair + half] = second * cosine[pair] + first * sine[pair];
-        }
+        detail::rope_rotate_f32(vector, vector + half, cosine.data(), sine.data(), half);
     }
 }
 

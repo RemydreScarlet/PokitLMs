@@ -47,6 +47,27 @@ inline float dot_i8_f32(const float* lhs, const std::int8_t* quantized,
     return sum;
 }
 
+inline void rope_rotate_f32(float* first, float* second, const float* cosine,
+                            const float* sine, std::size_t count) noexcept {
+    std::size_t i = 0;
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    for (; i + 4 <= count; i += 4) {
+        const auto a = vld1q_f32(first + i);
+        const auto b = vld1q_f32(second + i);
+        const auto c = vld1q_f32(cosine + i);
+        const auto s = vld1q_f32(sine + i);
+        vst1q_f32(first + i, vsubq_f32(vmulq_f32(a, c), vmulq_f32(b, s)));
+        vst1q_f32(second + i, vaddq_f32(vmulq_f32(b, c), vmulq_f32(a, s)));
+    }
+#endif
+    for (; i < count; ++i) {
+        const float a = first[i];
+        const float b = second[i];
+        first[i] = a * cosine[i] - b * sine[i];
+        second[i] = b * cosine[i] + a * sine[i];
+    }
+}
+
 inline void scale_add_f32(float* destination, const float* source, float scale,
                           std::size_t count) noexcept {
     std::size_t i = 0;
