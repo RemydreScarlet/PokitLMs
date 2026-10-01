@@ -160,6 +160,80 @@ void decode_q4_k(const std::byte* block, std::array<float, 256>& values) {
     }
 }
 
+void decode_q5_k(const std::byte* block, std::array<float, 256>& values) {
+    const float d = half_to_float(read_u16(block));
+    const float dmin = half_to_float(read_u16(block + 2));
+    const auto* packed_scales = block + 4;
+    const auto* quants = block + 16;
+    const auto* high = block + 144;
+    auto scale_min = [packed_scales](std::size_t j) {
+        std::pair<std::uint8_t, std::uint8_t> result;
+        if (j < 4) {
+            result.first = std::to_integer<std::uint8_t>(packed_scales[j]) & 63U;
+            result.second = std::to_integer<std::uint8_t>(packed_scales[j + 4]) & 63U;
+        } else {
+            result.first = (std::to_integer<std::uint8_t>(packed_scales[j + 4]) & 0x0fU) |
+                ((std::to_integer<std::uint8_t>(packed_scales[j - 4]) >> 6) << 4);
+            result.second = (std::to_integer<std::uint8_t>(packed_scales[j + 4]) >> 4) |
+                ((std::to_integer<std::uint8_t>(packed_scales[j]) >> 6) << 4);
+        }
+        return result;
+    };
+    std::size_t out = 0;
+    std::size_t is = 0;
+    std::uint8_t mask1 = 1, mask2 = 2;
+    for (std::size_t chunk = 0; chunk < 4; ++chunk) {
+        const auto [s0, m0] = scale_min(is++);
+        const auto [s1, m1] = scale_min(is++);
+        const float ds0 = d * s0, dm0 = dmin * m0;
+        const float ds1 = d * s1, dm1 = dmin * m1;
+        for (std::size_t i = 0; i < 32; ++i) {
+            const auto qh = std::to_integer<std::uint8_t>(high[i]);
+            const auto ql = std::to_integer<std::uint8_t>(quants[i]);
+            values[out++] = ds0 * ((ql & 0x0fU) + ((qh & mask1) ? 16U : 0U)) - dm0;
+        }
+        for (std::size_t i = 0; i < 32; ++i) {
+            const auto qh = std::to_integer<std::uint8_t>(high[i]);
+            const auto ql = std::to_integer<std::uint8_t>(quants[i]);
+            values[out++] = ds1 * ((ql >> 4) + ((qh & mask2) ? 16U : 0U)) - dm1;
+        }
+        quants += 32;
+        mask1 = static_cast<std::uint8_t>(mask1 << 2);
+        mask2 = static_cast<std::uint8_t>(mask2 << 2);
+        if (mask1 == 0) { high += 32; mask1 = 1; mask2 = 2; }
+    }
+}
+
+void decode_q6_k(const std::byte* block, std::array<float, 256>& values) {
+    const auto* low = block;
+    const auto* high = block + 128;
+    const auto* scales = block + 192;
+    const float d = half_to_float(read_u16(block + 208));
+    for (std::size_t half = 0; half < 2; ++half) {
+        const auto base = half * 128;
+        for (std::size_t lane = 0; lane < 32; ++lane) {
+            const auto is = lane / 16;
+            const auto lo0 = std::to_integer<std::uint8_t>(low[lane]);
+            const auto lo1 = std::to_integer<std::uint8_t>(low[lane + 32]);
+            const auto hi = std::to_integer<std::uint8_t>(high[lane]);
+            const int q0 = static_cast<int>((lo0 & 0x0fU) | ((hi & 0x03U) << 4)) - 32;
+            const int q1 = static_cast<int>((lo1 & 0x0fU) | ((hi >> 2 & 0x03U) << 4)) - 32;
+            const int q2 = static_cast<int>((lo0 >> 4) | ((hi >> 4 & 0x03U) << 4)) - 32;
+            const int q3 = static_cast<int>((lo1 >> 4) | ((hi >> 6 & 0x03U) << 4)) - 32;
+            const auto s0 = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(scales[half * 8 + is]));
+            const auto s1 = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(scales[half * 8 + is + 2]));
+            const auto s2 = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(scales[half * 8 + is + 4]));
+            const auto s3 = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(scales[half * 8 + is + 6]));
+            values[base + lane] = d * s0 * q0;
+            values[base + lane + 32] = d * s1 * q1;
+            values[base + lane + 64] = d * s2 * q2;
+            values[base + lane + 96] = d * s3 * q3;
+        }
+        low += 64;
+        high += 32;
+    }
+}
+
 template <std::size_t BlockElements, std::size_t BlockBytes, typename Decoder>
 void linear_k(std::span<const float> input, std::span<const std::byte> weights,
               std::size_t output_features, std::span<const float> bias,
@@ -261,9 +335,10 @@ void dequantize_quantized_row(std::uint32_t type,
         }
         return;
     }
-    if (type == 10 || type == 11 || type == 12) {
+    if (type == 10 || type == 11 || type == 12 || type == 13 || type == 14) {
         constexpr std::size_t block_elements = 256;
-        const std::size_t block_bytes = type == 10 ? 84 : type == 11 ? 110 : 144;
+        const std::size_t block_bytes = type == 10 ? 84 : type == 11 ? 110 :
+            type == 12 ? 144 : type == 13 ? 176 : 210;
         if (output.empty() || output.size() % block_elements != 0 ||
             encoded.size() != output.size() / block_elements * block_bytes) {
             throw std::invalid_argument("invalid K-quantized row dimensions");
@@ -273,7 +348,9 @@ void dequantize_quantized_row(std::uint32_t type,
             const auto* data = encoded.data() + block * block_bytes;
             if (type == 10) decode_q2_k(data, decoded);
             else if (type == 11) decode_q3_k(data, decoded);
-            else decode_q4_k(data, decoded);
+            else if (type == 12) decode_q4_k(data, decoded);
+            else if (type == 13) decode_q5_k(data, decoded);
+            else decode_q6_k(data, decoded);
             std::copy(decoded.begin(), decoded.end(), output.begin() +
                       static_cast<std::ptrdiff_t>(block * block_elements));
         }
@@ -314,6 +391,18 @@ void linear_q4_k(std::span<const float> input, std::span<const std::byte> weight
                  std::size_t output_features, std::span<const float> bias,
                  std::span<float> output) {
     linear_k<256, 144>(input, weights, output_features, bias, output, decode_q4_k);
+}
+
+void linear_q6_k(std::span<const float> input, std::span<const std::byte> weights,
+                 std::size_t output_features, std::span<const float> bias,
+                 std::span<float> output) {
+    linear_k<256, 210>(input, weights, output_features, bias, output, decode_q6_k);
+}
+
+void linear_q5_k(std::span<const float> input, std::span<const std::byte> weights,
+                 std::size_t output_features, std::span<const float> bias,
+                 std::span<float> output) {
+    linear_k<256, 176>(input, weights, output_features, bias, output, decode_q5_k);
 }
 
 }  // namespace pokitlms

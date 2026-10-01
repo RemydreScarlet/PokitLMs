@@ -35,5 +35,11 @@ void linear_q3_k(std::span<const float> input, std::span<const std::byte> weight
 void linear_q4_k(std::span<const float> input, std::span<const std::byte> weights,
                  std::size_t output_features, std::span<const float> bias,
                  std::span<float> output);
+void linear_q5_k(std::span<const float> input, std::span<const std::byte> weights,
+                 std::size_t output_features, std::span<const float> bias,
+                 std::span<float> output);
+void linear_q6_k(std::span<const float> input, std::span<const std::byte> weights,
+                 std::size_t output_features, std::span<const float> bias,
+                 std::span<float> output);
 
 }  // namespace pokitlms

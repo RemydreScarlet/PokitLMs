@@ -20,7 +20,7 @@ void tensor_linear(const TensorReader& weights, std::span<const float> input,
 
     const bool floating = tensor.type == 0 || tensor.type == 1;
     const bool quantized = tensor.type == 2 || tensor.type == 8 || tensor.type == 10 ||
-        tensor.type == 11 || tensor.type == 12;
+        tensor.type == 11 || tensor.type == 12 || tensor.type == 13 || tensor.type == 14;
     if (!floating && !quantized) {
         throw std::invalid_argument("unsupported GGUF matrix type for tensor_linear");
     }
@@ -44,6 +44,8 @@ void tensor_linear(const TensorReader& weights, std::span<const float> input,
                 case 10: linear_q2_k(input, encoded, rows, {}, destination); break;
                 case 11: linear_q3_k(input, encoded, rows, {}, destination); break;
                 case 12: linear_q4_k(input, encoded, rows, {}, destination); break;
+                case 13: linear_q5_k(input, encoded, rows, {}, destination); break;
+                case 14: linear_q6_k(input, encoded, rows, {}, destination); break;
                 default: throw std::logic_error("unreachable GGUF type dispatch");
             }
         }

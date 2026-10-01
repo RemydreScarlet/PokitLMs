@@ -17,14 +17,14 @@ These are design references, not dependencies. PokitLMs will implement its own m
 ## Backend status
 
 - C++20 tensor and reference operator scaffolding: RMSNorm, linear, feed-forward, and RoPE.
-- Scalar reference linear kernels for GGUF Q2_K, Q3_K, Q4_K, Q4_0, and Q8_0 weights.
+- Scalar reference linear kernels for GGUF Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q4_0, and Q8_0 weights.
 - File-backed expert slice reader with an LRU cache, disk-read accounting, and concurrent positioned reads on POSIX.
 - Shared random-access model file and GGUF tensor row reader; F32/F16 rows can be converted without loading a full tensor.
-- Disk-backed GGUF matrix-vector dispatch in bounded row batches for F32/F16, Q2_K, Q3_K, Q4_0, Q4_K, and Q8_0.
+- Disk-backed GGUF matrix-vector dispatch in bounded row batches for F32/F16, Q2_K, Q3_K, Q4_0, Q4_K, Q5_K, Q6_K, and Q8_0.
 - Single-token Qwen3-MoE decode path with per-layer GQA KV state, Q/K RMSNorm, RoPE, top-k routing, and cached on-demand expert execution.
 - GGUF v3 metadata/tensor-directory reader with known-format payload extent validation; payloads remain file-backed.
 - Expert tensor splitting by the GGUF last dimension, ready to feed routed slices into the bounded store.
-- Validated GGUF architecture parameters for Qwen3-MoE (`qwen3moe`); this is metadata support, not a complete model executor.
+- Validated GGUF architecture parameters and tensor index for Qwen3-MoE (`qwen3moe`); the token executor is still awaiting comparison with a reference model.
 - Qwen3-MoE tensor-name/shape index for the model's base, attention, router, and expert tensors.
 - Qwen GPT-2 byte-level BPE encoder/decoder using GGUF vocabulary, merge, token-type, and special-token metadata.
 - Streaming MoE routing callback that selects only the top-k expert IDs with O(top-k) routing memory.
@@ -44,8 +44,8 @@ ctest --test-dir build --output-on-failure
 
 ## Near-term backend work
 
-1. Connect GGUF tensor names and architecture metadata to an explicit supported-model registry.
-2. Implement quantized CPU dot products and MoE routing, then compare against small known fixtures.
-3. Add tokenizer and model-specific prompt/generation support for the first target architecture.
-4. Add async storage reads and compute/I/O overlap after the synchronous path is correct.
+1. Add tokenizer-backed prompt prefill and a multi-token generation API.
+2. Compare the Qwen3-MoE token path and each scalar quantized format against a reference implementation.
+3. Expand tensor-format coverage for common GGUF quantizations and tied-output models.
+4. Add async storage reads and compute/I/O overlap after the synchronous path is validated.
 5. Measure on target ARM64 devices before choosing cache defaults or adding platform-specific acceleration.
