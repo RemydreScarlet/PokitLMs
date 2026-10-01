@@ -13,7 +13,7 @@ namespace pokitlms::model {
 void tensor_linear(const TensorReader& weights, std::span<const float> input,
                    std::span<float> output, std::size_t row_batch) {
     const auto& tensor = weights.tensor();
-    if (tensor.dimensions.empty() || input.empty() || output.empty() || row_batch == 0 ||
+    if (tensor.dimensions.empty() || input.empty() || output.empty() ||
         tensor.dimensions.front() != input.size() || weights.row_count() != output.size()) {
         throw std::invalid_argument("GGUF matrix dimensions do not match linear input/output");
     }
@@ -26,6 +26,22 @@ void tensor_linear(const TensorReader& weights, std::span<const float> input,
     }
 
     const auto feature_count = input.size();
+    if (row_batch == 0) {
+        constexpr std::size_t target_working_set_bytes = 256U * 1024U;
+        std::size_t working_set_row_bytes = weights.row_bytes();
+        if (floating) {
+            if (feature_count > std::numeric_limits<std::size_t>::max() / sizeof(float)) {
+                throw std::length_error("GGUF tensor row size overflows");
+            }
+            const auto converted_bytes = feature_count * sizeof(float);
+            if (working_set_row_bytes > std::numeric_limits<std::size_t>::max() - converted_bytes) {
+                throw std::length_error("GGUF tensor row size overflows");
+            }
+            working_set_row_bytes += converted_bytes;
+        }
+        if (working_set_row_bytes == 0) throw std::length_error("GGUF tensor row size overflows");
+        row_batch = std::max<std::size_t>(1, target_working_set_bytes / working_set_row_bytes);
+    }
     const auto chunk_limit = std::min(row_batch, output.size());
     for (std::size_t first = 0; first < output.size();) {
         const auto rows = std::min(chunk_limit, output.size() - first);
