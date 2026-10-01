@@ -186,7 +186,9 @@ private:
         }
     }
 
-    static constexpr std::size_t kWorkerCount = 4;
+    // One worker executes the expert batch and reads gate weights directly;
+    // the other two workers read up/down weights concurrently.
+    static constexpr std::size_t kWorkerCount = 3;
     std::mutex mutex_;
     std::condition_variable ready_;
     std::deque<std::function<void()>> tasks_;
@@ -526,16 +528,14 @@ public:
                 const auto& up_slices = expert_slices[layer][1];
                 const auto& down_slices = expert_slices[layer][2];
                 const auto load_expert = [this, layer](std::size_t expert_id) {
-                    auto gate = expert_loader.submit([this, layer, expert_id] {
-                        return gate_stores[layer]->get(expert_id);
-                    });
                     auto up = expert_loader.submit([this, layer, expert_id] {
                         return up_stores[layer]->get(expert_id);
                     });
                     auto down = expert_loader.submit([this, layer, expert_id] {
                         return down_stores[layer]->get(expert_id);
                     });
-                    return ExpertWeights{gate.get(), up.get(), down.get()};
+                    auto gate = gate_stores[layer]->get(expert_id);
+                    return ExpertWeights{std::move(gate), up.get(), down.get()};
                 };
                 auto pending_weights = expert_loader.submit(
                     [load_expert, expert_id = routes.front().id] { return load_expert(expert_id); });
