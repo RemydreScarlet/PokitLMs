@@ -18,7 +18,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 
 - C++20 tensor and reference operator scaffolding: RMSNorm, linear, feed-forward, and RoPE.
 - Scalar reference linear kernels for GGUF Q4_0 and Q8_0 weights.
-- File-backed expert slice reader with an LRU cache and disk-read accounting.
+- File-backed expert slice reader with an LRU cache, disk-read accounting, and concurrent positioned reads on POSIX.
 - GGUF v3 metadata and tensor-directory reader; payloads remain file-backed.
 - Streaming MoE routing callback that selects only the top-k expert IDs with O(top-k) routing memory.
 - C API version function.
