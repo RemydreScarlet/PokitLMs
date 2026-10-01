@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 #define POKITLMS_VERSION_MAJOR 0
-#define POKITLMS_VERSION_MINOR 3
+#define POKITLMS_VERSION_MINOR 4
 #define POKITLMS_VERSION_PATCH 0
 
 const char* pokitlms_version(void);
@@ -48,12 +48,23 @@ typedef struct pokitlms_chat_message {
     const char* content; // UTF-8 message content.
 } pokitlms_chat_message;
 
+typedef enum pokitlms_kv_cache_precision {
+    POKITLMS_KV_CACHE_FP16 = 0,
+    POKITLMS_KV_CACHE_Q8_0 = 1
+} pokitlms_kv_cache_precision;
+
 // Creates a single-sequence Qwen3-MoE model handle. context_capacity sets the
 // resident KV window (older positions roll out); zero selects the mobile default.
+// The default constructor stores KV values in FP16; use create_ex to select Q8_0.
 // Error text, when provided, is truncated and NUL-terminated.
 pokitlms_status pokitlms_qwen3moe_create(
     const char* model_path, size_t expert_cache_budget_bytes, size_t context_capacity,
     pokitlms_model** out_model, char* error_buffer, size_t error_capacity);
+// Extended constructor that lets callers trade KV precision for resident memory.
+pokitlms_status pokitlms_qwen3moe_create_ex(
+    const char* model_path, size_t expert_cache_budget_bytes, size_t context_capacity,
+    pokitlms_kv_cache_precision kv_precision, pokitlms_model** out_model,
+    char* error_buffer, size_t error_capacity);
 void pokitlms_model_destroy(pokitlms_model* model);
 
 // Generates UTF-8 output from a raw prompt; supply any chat-template markers in
@@ -87,6 +98,7 @@ pokitlms_status pokitlms_model_generate_chat_history(
 pokitlms_status pokitlms_model_get_expert_cache_stats(
     const pokitlms_model* model, pokitlms_expert_cache_stats* out_stats);
 uint64_t pokitlms_model_bytes_read_from_disk(const pokitlms_model* model);
+size_t pokitlms_model_kv_cache_storage_bytes(const pokitlms_model* model);
 
 #ifdef __cplusplus
 }

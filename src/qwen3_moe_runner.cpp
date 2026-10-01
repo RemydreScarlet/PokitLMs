@@ -304,7 +304,8 @@ std::uint32_t sample_token(std::span<const float> logits,
 
 class Qwen3MoeRunner::Impl {
 public:
-    Impl(std::filesystem::path path, std::size_t cache_budget, std::size_t requested_context)
+    Impl(std::filesystem::path path, std::size_t cache_budget, std::size_t requested_context,
+         KvCachePrecision kv_precision)
         : model_path(std::move(path)), gguf(model_path),
           file(std::make_shared<storage::ModelFile>(model_path)), index(gguf), tokenizer(gguf) {
         const auto& config = index.config();
@@ -355,7 +356,7 @@ public:
             key_norms.push_back(load_vector(file, block.key_norm));
             feed_forward_norms.push_back(load_vector(file, block.feed_forward_norm));
             kv_caches.emplace_back(context_capacity, kv_heads, key_dim, value_dim,
-                                   KvCachePrecision::Float16);
+                                   kv_precision);
             gate_stores.push_back(std::make_unique<storage::ExpertStore>(
                 file, std::move(expert_slices[layer][0]), cache_capacities[layer * 3]));
             up_stores.push_back(std::make_unique<storage::ExpertStore>(
@@ -532,6 +533,18 @@ public:
         return stats;
     }
 
+    std::size_t kv_storage_bytes() const noexcept {
+        std::size_t total = 0;
+        for (const auto& cache : kv_caches) {
+            const auto bytes = cache.storage_bytes();
+            if (bytes > std::numeric_limits<std::size_t>::max() - total) {
+                return std::numeric_limits<std::size_t>::max();
+            }
+            total += bytes;
+        }
+        return total;
+    }
+
     std::vector<std::uint32_t> generate(std::span<const std::uint32_t> prompt,
                                         std::size_t max_new_tokens,
                                         const GenerationOptions& options,
@@ -582,9 +595,10 @@ public:
 
 Qwen3MoeRunner::Qwen3MoeRunner(std::filesystem::path model_path,
                                std::size_t expert_cache_budget_bytes,
-                               std::size_t context_capacity) {
+                               std::size_t context_capacity,
+                               KvCachePrecision kv_precision) {
     impl_ = std::make_unique<Impl>(std::move(model_path), expert_cache_budget_bytes,
-                                   context_capacity);
+                                   context_capacity, kv_precision);
 }
 
 Qwen3MoeRunner::~Qwen3MoeRunner() = default;
@@ -688,6 +702,9 @@ void Qwen3MoeRunner::reset() { if (impl_) impl_->reset(); }
 const TransformerConfig& Qwen3MoeRunner::config() const noexcept {
     static const TransformerConfig empty{};
     return impl_ ? impl_->index.config() : empty;
+}
+std::size_t Qwen3MoeRunner::kv_cache_storage_bytes() const noexcept {
+    return impl_ ? impl_->kv_storage_bytes() : 0;
 }
 std::uint64_t Qwen3MoeRunner::bytes_read_from_disk() const noexcept {
     return impl_ && impl_->file ? impl_->file->bytes_read() : 0;

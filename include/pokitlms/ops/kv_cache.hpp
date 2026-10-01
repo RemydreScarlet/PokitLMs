@@ -6,7 +6,7 @@
 
 namespace pokitlms {
 
-enum class KvCachePrecision : std::uint8_t { Float32, Float16 };
+enum class KvCachePrecision : std::uint8_t { Float32, Float16, Q8_0 };
 
 // Fixed-capacity, single-sequence KV state for autoregressive decode.
 // Storage is [position, KV head, head dimension]; old positions are evicted
@@ -46,6 +46,12 @@ private:
     std::vector<float> values_;
     std::vector<std::uint16_t> keys_f16_;
     std::vector<std::uint16_t> values_f16_;
+    std::vector<std::int8_t> keys_q8_;
+    std::vector<std::int8_t> values_q8_;
+    std::vector<std::uint16_t> keys_q8_scales_;
+    std::vector<std::uint16_t> values_q8_scales_;
+    std::size_t key_blocks_per_head_{};
+    std::size_t value_blocks_per_head_{};
     std::vector<float> scores_;
 };
 

@@ -38,13 +38,13 @@ double tokens_per_second(std::size_t tokens, std::uint64_t nanoseconds) {
 
 void print_usage(const char* executable) {
     std::cerr << "Usage: " << executable
-              << " MODEL.gguf USER_MESSAGE [new_tokens=32] [expert_cache_mib=128] [kv_window=0]\n";
+              << " MODEL.gguf USER_MESSAGE [new_tokens=32] [expert_cache_mib=128] [kv_window=0] [kv_precision=fp16|q8]\n";
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3 || argc > 6) {
+    if (argc < 3 || argc > 7) {
         print_usage(argv[0]);
         return 2;
     }
@@ -53,6 +53,12 @@ int main(int argc, char** argv) {
         const auto max_new_tokens = argc > 3 ? parse_size(argv[3], "new token count") : 32;
         const auto cache_mib = argc > 4 ? parse_size(argv[4], "expert cache MiB") : 128;
         const auto kv_window = argc > 5 ? parse_size(argv[5], "KV window") : 0;
+        pokitlms::KvCachePrecision kv_precision = pokitlms::KvCachePrecision::Float16;
+        if (argc > 6) {
+            const std::string_view name(argv[6]);
+            if (name == "q8") kv_precision = pokitlms::KvCachePrecision::Q8_0;
+            else if (name != "fp16") throw std::invalid_argument("KV precision must be fp16 or q8");
+        }
         constexpr std::size_t mib = 1024U * 1024U;
         if (cache_mib > std::numeric_limits<std::size_t>::max() / mib) {
             throw std::invalid_argument("expert cache MiB value is too large");
@@ -63,7 +69,8 @@ int main(int argc, char** argv) {
         pokitlms::model::QwenBpeTokenizer tokenizer(tokenizer_model);
 
         const auto load_start = std::chrono::steady_clock::now();
-        pokitlms::model::Qwen3MoeRunner runner(model_path, cache_mib * mib, kv_window);
+        pokitlms::model::Qwen3MoeRunner runner(model_path, cache_mib * mib, kv_window,
+                                                kv_precision);
         const auto load_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - load_start).count();
 
@@ -96,6 +103,7 @@ int main(int argc, char** argv) {
                   << tokens_per_second(generation_stats.generated_tokens,
                                        generation_stats.decode_time_ns) << '\n'
                   << "model_bytes_read=" << bytes_read << '\n'
+                  << "kv_cache_storage_bytes=" << runner.kv_cache_storage_bytes() << '\n'
                   << "expert_cache_capacity_bytes=" << cache.capacity_bytes << '\n'
                   << "expert_cache_resident_bytes=" << cache.resident_bytes << '\n'
                   << "expert_cache_bytes_read=" << cache.bytes_read << '\n'
@@ -103,6 +111,7 @@ int main(int argc, char** argv) {
                   << "expert_cache_read_time_ms=" << milliseconds(cache.read_time_ns) << '\n'
                   << "expert_cache_hits=" << cache.hits << '\n'
                   << "expert_cache_misses=" << cache.misses << '\n';
+        std::cerr << "kv_precision=" << (kv_precision == pokitlms::KvCachePrecision::Q8_0 ? "q8" : "fp16") << '\n';
         if (cache.hits + cache.misses != 0) {
             std::cerr << "expert_cache_hit_percent="
                       << 100.0 * static_cast<double>(cache.hits) /

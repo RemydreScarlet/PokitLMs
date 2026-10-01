@@ -36,6 +36,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Streaming MoE routing callback that selects only the top-k expert IDs with O(top-k) routing memory.
 - Fixed-capacity ring-buffer KV cache and numerically stable grouped-query causal attention primitive.
 - FP16 KV residency option; Qwen3-MoE runner uses it by default to halve cache storage while accumulating attention in FP32.
+- Optional blockwise Q8_0 KV storage with FP32 attention accumulation for smaller mobile KV footprints; FP16 remains the default. KV resident bytes are exposed to C++/C and printed by the benchmark CLI.
 - Bounded sliding KV window: older positions roll out while RoPE positions continue up to the model's advertised context length.
 - Expert cache telemetry from the runner and C API: total budget/residency, bytes and operations read, cumulative read time, hits, and misses.
 - Expert cache memory is apportioned in whole tensor-slice slots under one aggregate budget, so large expert matrices are not silently left uncached when an equal per-store share cannot hold even one slice.
@@ -71,11 +72,12 @@ decode throughput, total bytes read, and expert-cache latency and hit rate. It
 is built by default for host and Android builds:
 
 ```bash
-./build/pokitlms-bench MODEL.gguf "Explain MoE routing" 64 256 512
+./build/pokitlms-bench MODEL.gguf "Explain MoE routing" 64 256 512 q8
 ```
 
-The positional options are generated token limit, expert-cache MiB, and KV
-window size. A KV window of zero selects the mobile default. The output reply
+The positional options are generated token limit, expert-cache MiB, KV
+window size, and KV precision (`fp16` or `q8`). A KV window of zero selects
+the mobile default. The output reply
 goes to stdout and the measurements go to stderr.
 
 ## Near-term backend work

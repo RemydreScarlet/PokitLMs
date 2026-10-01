@@ -61,4 +61,26 @@ inline void scale_add_f32(float* destination, const float* source, float scale,
     for (; i < count; ++i) destination[i] += scale * source[i];
 }
 
+inline void scale_add_i8_f32(float* destination, const std::int8_t* source,
+                             float scale, std::size_t count) noexcept {
+    std::size_t i = 0;
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    const float32x4_t factor = vdupq_n_f32(scale);
+    for (; i + 16 <= count; i += 16) {
+        const int8x16_t q8 = vld1q_s8(source + i);
+        const int16x8_t q16lo = vmovl_s8(vget_low_s8(q8));
+        const int16x8_t q16hi = vmovl_s8(vget_high_s8(q8));
+        const int32x4_t q32[4] = {
+            vmovl_s16(vget_low_s16(q16lo)), vmovl_s16(vget_high_s16(q16lo)),
+            vmovl_s16(vget_low_s16(q16hi)), vmovl_s16(vget_high_s16(q16hi))};
+        for (std::size_t group = 0; group < 4; ++group) {
+            const auto dst = vld1q_f32(destination + i + group * 4);
+            const auto values = vcvtq_f32_s32(q32[group]);
+            vst1q_f32(destination + i + group * 4, vfmaq_f32(dst, values, factor));
+        }
+    }
+#endif
+    for (; i < count; ++i) destination[i] += scale * static_cast<float>(source[i]);
+}
+
 }  // namespace pokitlms::detail

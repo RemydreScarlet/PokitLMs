@@ -2,6 +2,7 @@
 
 #include "pokitlms/model/gguf_reader.hpp"
 #include "pokitlms/model/qwen3_moe_index.hpp"
+#include "pokitlms/ops/kv_cache.hpp"
 #include "pokitlms/storage/expert_store.hpp"
 
 #include <cstddef>
@@ -50,7 +51,8 @@ class Qwen3MoeRunner {
 public:
     explicit Qwen3MoeRunner(std::filesystem::path model_path,
                             std::size_t expert_cache_budget_bytes = 128U * 1024U * 1024U,
-                            std::size_t context_capacity = 0); // KV window; 0 selects a mobile default.
+                            std::size_t context_capacity = 0,
+                            KvCachePrecision kv_precision = KvCachePrecision::Float16); // FP16 by default.
     ~Qwen3MoeRunner();
     Qwen3MoeRunner(Qwen3MoeRunner&&) noexcept;
     Qwen3MoeRunner& operator=(Qwen3MoeRunner&&) noexcept;
@@ -82,6 +84,7 @@ public:
         const GenerationOptions& options = {});
     void reset();
     [[nodiscard]] const TransformerConfig& config() const noexcept;
+    [[nodiscard]] std::size_t kv_cache_storage_bytes() const noexcept;
     [[nodiscard]] std::uint64_t bytes_read_from_disk() const noexcept;
     [[nodiscard]] ExpertCacheStats expert_cache_stats() const;
 

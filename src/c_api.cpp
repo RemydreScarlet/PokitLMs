@@ -11,8 +11,8 @@
 
 struct pokitlms_model {
     explicit pokitlms_model(std::filesystem::path path, std::size_t cache_bytes,
-                            std::size_t context)
-        : runner(std::move(path), cache_bytes, context) {}
+                            std::size_t context, pokitlms::KvCachePrecision kv_precision)
+        : runner(std::move(path), cache_bytes, context, kv_precision) {}
     pokitlms::model::Qwen3MoeRunner runner;
 };
 
@@ -36,7 +36,7 @@ pokitlms::model::GenerationOptions convert_options(const pokitlms_generation_opt
 }  // namespace
 
 const char* pokitlms_version(void) {
-    return "0.3.0";
+    return "0.4.0";
 }
 
 void pokitlms_generation_options_init(pokitlms_generation_options* options) {
@@ -47,13 +47,30 @@ void pokitlms_generation_options_init(pokitlms_generation_options* options) {
 pokitlms_status pokitlms_qwen3moe_create(
     const char* model_path, size_t expert_cache_budget_bytes, size_t context_capacity,
     pokitlms_model** out_model, char* error_buffer, size_t error_capacity) {
+    return pokitlms_qwen3moe_create_ex(model_path, expert_cache_budget_bytes, context_capacity,
+                                       POKITLMS_KV_CACHE_FP16, out_model, error_buffer,
+                                       error_capacity);
+}
+
+pokitlms_status pokitlms_qwen3moe_create_ex(
+    const char* model_path, size_t expert_cache_budget_bytes, size_t context_capacity,
+    pokitlms_kv_cache_precision kv_precision, pokitlms_model** out_model,
+    char* error_buffer, size_t error_capacity) {
     if (out_model) *out_model = nullptr;
     if (!model_path || model_path[0] == '\0' || !out_model) {
         set_error(error_buffer, error_capacity, "model path and output handle are required");
         return POKITLMS_STATUS_INVALID_ARGUMENT;
     }
+    pokitlms::KvCachePrecision precision;
+    if (kv_precision == POKITLMS_KV_CACHE_FP16) precision = pokitlms::KvCachePrecision::Float16;
+    else if (kv_precision == POKITLMS_KV_CACHE_Q8_0) precision = pokitlms::KvCachePrecision::Q8_0;
+    else {
+        set_error(error_buffer, error_capacity, "unsupported KV cache precision");
+        return POKITLMS_STATUS_INVALID_ARGUMENT;
+    }
     try {
-        *out_model = new pokitlms_model(model_path, expert_cache_budget_bytes, context_capacity);
+        *out_model = new pokitlms_model(model_path, expert_cache_budget_bytes,
+                                        context_capacity, precision);
         set_error(error_buffer, error_capacity, "");
         return POKITLMS_STATUS_OK;
     } catch (const std::invalid_argument& error) {
@@ -195,4 +212,8 @@ pokitlms_status pokitlms_model_get_expert_cache_stats(
 
 uint64_t pokitlms_model_bytes_read_from_disk(const pokitlms_model* model) {
     return model ? model->runner.bytes_read_from_disk() : 0;
+}
+
+size_t pokitlms_model_kv_cache_storage_bytes(const pokitlms_model* model) {
+    return model ? model->runner.kv_cache_storage_bytes() : 0;
 }
