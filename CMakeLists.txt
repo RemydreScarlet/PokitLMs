@@ -26,6 +26,7 @@ add_library(pokitlms
     src/kv_cache.cpp
     src/qwen3_moe_index.cpp
     src/qwen35_index.cpp
+    src/qwen35_runner.cpp
     src/qwen_bpe_tokenizer.cpp
     src/c_api.cpp
 )
