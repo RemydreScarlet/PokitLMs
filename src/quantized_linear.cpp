@@ -8,6 +8,7 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace pokitlms {
 namespace {
@@ -200,6 +201,85 @@ void decode_q4_k(const std::byte* block, std::array<float, 256>& values) {
             values[out++] = ds1 * (packed >> 4) - dm1;
         }
         quants += 32;
+    }
+}
+
+[[maybe_unused]] std::pair<std::uint8_t, std::uint8_t> q4_k_scale_min(
+    const std::byte* packed_scales, std::size_t index) {
+    std::pair<std::uint8_t, std::uint8_t> result;
+    if (index < 4) {
+        result.first = std::to_integer<std::uint8_t>(packed_scales[index]) & 63U;
+        result.second = std::to_integer<std::uint8_t>(packed_scales[index + 4]) & 63U;
+    } else {
+        result.first = (std::to_integer<std::uint8_t>(packed_scales[index + 4]) & 0x0fU) |
+            ((std::to_integer<std::uint8_t>(packed_scales[index - 4]) >> 6) << 4);
+        result.second = (std::to_integer<std::uint8_t>(packed_scales[index + 4]) >> 4) |
+            ((std::to_integer<std::uint8_t>(packed_scales[index]) >> 6) << 4);
+    }
+    return result;
+}
+
+[[maybe_unused]] void linear_q4_k_direct(std::span<const float> input,
+                                         std::span<const std::byte> weights,
+                                         std::size_t output_features,
+                                         std::span<const float> bias,
+                                         std::span<float> output) {
+    constexpr std::size_t block_elements = 256;
+    constexpr std::size_t block_bytes = 144;
+    if (input.empty() || input.size() % block_elements != 0 || output_features == 0 ||
+        output.size() != output_features || (!bias.empty() && bias.size() != output_features)) {
+        throw std::invalid_argument("invalid Q4_K linear dimensions");
+    }
+    const auto blocks_per_row = input.size() / block_elements;
+    if (output_features > std::numeric_limits<std::size_t>::max() / blocks_per_row ||
+        output_features * blocks_per_row > std::numeric_limits<std::size_t>::max() / block_bytes ||
+        weights.size() != output_features * blocks_per_row * block_bytes) {
+        throw std::invalid_argument("Q4_K weight byte size does not match dimensions");
+    }
+
+    const auto input_groups = blocks_per_row * 8;
+    std::vector<float> input_sums(input_groups, 0.0F);
+    for (std::size_t block = 0; block < blocks_per_row; ++block) {
+        for (std::size_t group = 0; group < 8; ++group) {
+            const auto input_offset = block * block_elements + group * 32;
+            float group_sum = 0.0F;
+            for (std::size_t i = 0; i < 32; ++i) group_sum += input[input_offset + i];
+            input_sums[block * 8 + group] = group_sum;
+        }
+    }
+
+    std::array<std::int8_t, 32> signed_quants{};
+    for (std::size_t row = 0; row < output_features; ++row) {
+        float row_sum = bias.empty() ? 0.0F : bias[row];
+        for (std::size_t block = 0; block < blocks_per_row; ++block) {
+            const auto* encoded = weights.data() + (row * blocks_per_row + block) * block_bytes;
+            const float global_scale = half_to_float(read_u16(encoded));
+            const float global_minimum = half_to_float(read_u16(encoded + 2));
+            const auto* packed_scales = encoded + 4;
+            const auto* quants = encoded + 16;
+            const auto input_base = block * block_elements;
+            for (std::size_t chunk = 0; chunk < 4; ++chunk) {
+                const auto* packed = quants + chunk * 32;
+                for (std::size_t part = 0; part < 2; ++part) {
+                    const auto group = chunk * 2 + part;
+                    const auto [scale, minimum] = q4_k_scale_min(packed_scales, group);
+                    const float weight_scale = global_scale * static_cast<float>(scale);
+                    const float weight_minimum = global_minimum * static_cast<float>(minimum);
+                    const auto input_offset = input_base + group * 32;
+                    for (std::size_t i = 0; i < 32; ++i) {
+                        const auto byte = std::to_integer<std::uint8_t>(packed[i]);
+                        const auto quant = part == 0 ? byte & 0x0fU : byte >> 4;
+                        signed_quants[i] = static_cast<std::int8_t>(static_cast<int>(quant) - 8);
+                    }
+                    const float signed_dot = detail::dot_i8_f32(
+                        input.data() + input_offset, signed_quants.data(), signed_quants.size());
+                    const float input_sum = input_sums[block * 8 + group];
+                    row_sum += weight_scale * (signed_dot + 8.0F * input_sum) -
+                               weight_minimum * input_sum;
+                }
+            }
+        }
+        output[row] = row_sum;
     }
 }
 
@@ -461,7 +541,11 @@ void linear_q3_k(std::span<const float> input, std::span<const std::byte> weight
 void linear_q4_k(std::span<const float> input, std::span<const std::byte> weights,
                  std::size_t output_features, std::span<const float> bias,
                  std::span<float> output) {
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    linear_q4_k_direct(input, weights, output_features, bias, output);
+#else
     linear_k<256, 144>(input, weights, output_features, bias, output, decode_q4_k);
+#endif
 }
 
 void linear_q6_k(std::span<const float> input, std::span<const std::byte> weights,

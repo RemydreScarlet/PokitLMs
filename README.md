@@ -17,7 +17,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 ## Backend status
 
 - C++20 tensor and reference operator scaffolding: RMSNorm, linear, feed-forward, and RoPE.
-- Portable linear kernels for GGUF Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, and Q8_0 weights, with optimized ARM64 dot-product and Q4_0 unpack paths.
+- Portable linear kernels for GGUF Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, and Q8_0 weights, with an AArch64 Q4_K path that accumulates packed 4-bit values directly without a decoded float block.
 - File-backed expert slice reader with an LRU cache, disk-read accounting, and concurrent positioned reads on POSIX.
 - Expert loads request best-effort OS page-cache eviction after copying into the bounded expert cache, avoiding a second cached copy of routed weights.
 - Shared random-access model file and GGUF tensor row reader; F32/F16/BF16 rows can be converted without loading a full tensor.
