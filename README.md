@@ -19,6 +19,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - C++20 tensor and reference operator scaffolding: RMSNorm, linear, feed-forward, and RoPE.
 - Scalar reference linear kernels for GGUF Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q4_0, and Q8_0 weights.
 - File-backed expert slice reader with an LRU cache, disk-read accounting, and concurrent positioned reads on POSIX.
+- Expert loads request best-effort OS page-cache eviction after copying into the bounded expert cache, avoiding a second cached copy of routed weights.
 - Shared random-access model file and GGUF tensor row reader; F32/F16/BF16 rows can be converted without loading a full tensor.
 - Disk-backed GGUF matrix-vector dispatch in bounded row batches for F32/F16/BF16, Q2_K, Q3_K, Q4_0, Q4_K, Q5_K, Q6_K, and Q8_0.
 - Automatically sizes matrix row reads around a 256 KiB temporary weight window to reduce small storage reads.

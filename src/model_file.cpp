@@ -52,7 +52,8 @@ public:
 #endif
     }
 
-    void read_into(std::uint64_t offset, std::span<std::byte> destination) const {
+    void read_into(std::uint64_t offset, std::span<std::byte> destination,
+                   bool discard_cache = false) const {
         if (offset > file_size || destination.size() > file_size - offset) {
             throw std::out_of_range("model file read exceeds file bounds");
         }
@@ -83,6 +84,19 @@ public:
             if (count <= 0) throw std::runtime_error("failed to read model file: " + path.string());
             completed += static_cast<std::size_t>(count);
         }
+        if (discard_cache) {
+            const long page_size = ::sysconf(_SC_PAGESIZE);
+            if (page_size > 0) {
+                const auto page = static_cast<std::uint64_t>(page_size);
+                const auto begin = offset - offset % page;
+                const auto end = offset + destination.size();
+                const auto remainder = end % page;
+                const auto rounded_end = remainder == 0 || end > file_size - std::min(page - remainder, file_size)
+                    ? file_size : end + (page - remainder);
+                (void)::posix_fadvise(fd, static_cast<off_t>(begin),
+                                      static_cast<off_t>(rounded_end - begin), POSIX_FADV_DONTNEED);
+            }
+        }
 #endif
         bytes_read.fetch_add(destination.size(), std::memory_order_relaxed);
     }
@@ -108,6 +122,11 @@ std::uint64_t ModelFile::bytes_read() const noexcept {
 void ModelFile::read_into(std::uint64_t offset, std::span<std::byte> destination) const {
     if (!impl_) throw std::logic_error("model file is unavailable");
     impl_->read_into(offset, destination);
+}
+void ModelFile::read_into_uncached(std::uint64_t offset,
+                                   std::span<std::byte> destination) const {
+    if (!impl_) throw std::logic_error("model file is unavailable");
+    impl_->read_into(offset, destination, true);
 }
 std::vector<std::byte> ModelFile::read(std::uint64_t offset, std::size_t size) const {
     std::vector<std::byte> result(size);

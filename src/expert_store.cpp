@@ -88,7 +88,7 @@ std::shared_ptr<const std::vector<std::byte>> ExpertStore::get(std::size_t exper
 
     const auto slice = impl_->experts[expert_id];
     auto bytes = std::make_shared<std::vector<std::byte>>(slice.size);
-    impl_->file->read_into(slice.offset, *bytes);
+    impl_->file->read_into_uncached(slice.offset, *bytes);
 
     std::lock_guard lock(impl_->mutex);
     impl_->disk_bytes += slice.size;
