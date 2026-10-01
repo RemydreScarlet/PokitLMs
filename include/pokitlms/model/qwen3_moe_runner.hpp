@@ -23,6 +23,12 @@ struct GenerationOptions {
     std::uint64_t seed{};
 };
 
+struct GenerationStats {
+    std::uint64_t prefill_time_ns{};
+    std::uint64_t decode_time_ns{};
+    std::size_t generated_tokens{};
+};
+
 struct ExpertCacheStats {
     std::size_t capacity_bytes{};
     std::size_t resident_bytes{};
@@ -53,7 +59,7 @@ public:
     // The EOS token is included when generated.
     [[nodiscard]] std::vector<std::uint32_t> generate_tokens(
         std::span<const std::uint32_t> prompt, std::size_t max_new_tokens,
-        const GenerationOptions& options = {});
+        const GenerationOptions& options = {}, GenerationStats* stats = nullptr);
     // Tokenizes a raw prompt and decodes generated IDs. Add any desired model chat
     // template markers to prompt before calling; this method does not infer a template.
     [[nodiscard]] std::string generate_text(

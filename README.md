@@ -65,6 +65,18 @@ cmake -S . -B build-android-arm64 \
 cmake --build build-android-arm64 -j
 ```
 
+`pokitlms-bench` runs a real GGUF model and reports model load time, prefill and
+decode throughput, total bytes read, and expert-cache latency and hit rate. It
+is built by default for host and Android builds:
+
+```bash
+./build/pokitlms-bench MODEL.gguf "Explain MoE routing" 64 256 512
+```
+
+The positional options are generated token limit, expert-cache MiB, and KV
+window size. A KV window of zero selects the mobile default. The output reply
+goes to stdout and the measurements go to stderr.
+
 ## Near-term backend work
 
 1. Cross-build and compare tokenizer, Qwen3-MoE decode, and each quantized format against reference outputs.

@@ -1,0 +1,117 @@
+#include "pokitlms/model/qwen3_moe_runner.hpp"
+#include "pokitlms/model/qwen_bpe_tokenizer.hpp"
+
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace {
+
+std::size_t parse_size(const char* text, const char* label) {
+    const std::string_view input(text);
+    std::uint64_t value{};
+    const auto [end, error] = std::from_chars(input.data(), input.data() + input.size(), value);
+    if (error != std::errc{} || end != input.data() + input.size() ||
+        value > std::numeric_limits<std::size_t>::max()) {
+        throw std::invalid_argument(std::string("invalid ") + label + ": " + text);
+    }
+    return static_cast<std::size_t>(value);
+}
+
+double milliseconds(std::uint64_t nanoseconds) {
+    return static_cast<double>(nanoseconds) / 1'000'000.0;
+}
+
+double tokens_per_second(std::size_t tokens, std::uint64_t nanoseconds) {
+    if (nanoseconds == 0) return 0.0;
+    return static_cast<double>(tokens) * 1'000'000'000.0 /
+           static_cast<double>(nanoseconds);
+}
+
+void print_usage(const char* executable) {
+    std::cerr << "Usage: " << executable
+              << " MODEL.gguf USER_MESSAGE [new_tokens=32] [expert_cache_mib=128] [kv_window=0]\n";
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc < 3 || argc > 6) {
+        print_usage(argv[0]);
+        return 2;
+    }
+
+    try {
+        const auto max_new_tokens = argc > 3 ? parse_size(argv[3], "new token count") : 32;
+        const auto cache_mib = argc > 4 ? parse_size(argv[4], "expert cache MiB") : 128;
+        const auto kv_window = argc > 5 ? parse_size(argv[5], "KV window") : 0;
+        constexpr std::size_t mib = 1024U * 1024U;
+        if (cache_mib > std::numeric_limits<std::size_t>::max() / mib) {
+            throw std::invalid_argument("expert cache MiB value is too large");
+        }
+
+        const std::filesystem::path model_path(argv[1]);
+        pokitlms::model::GgufReader tokenizer_model(model_path);
+        pokitlms::model::QwenBpeTokenizer tokenizer(tokenizer_model);
+
+        const auto load_start = std::chrono::steady_clock::now();
+        pokitlms::model::Qwen3MoeRunner runner(model_path, cache_mib * mib, kv_window);
+        const auto load_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - load_start).count();
+
+        std::string prompt = "<|im_start|>user\n";
+        prompt += argv[2];
+        prompt += "<|im_end|>\n<|im_start|>assistant\n";
+        const auto prompt_tokens = tokenizer.encode(prompt);
+        pokitlms::model::GenerationStats generation_stats;
+        const auto bytes_before = runner.bytes_read_from_disk();
+        const auto generated = runner.generate_tokens(prompt_tokens, max_new_tokens, {},
+                                                      &generation_stats);
+        const auto bytes_read = runner.bytes_read_from_disk() - bytes_before;
+        const auto cache = runner.expert_cache_stats();
+
+        std::vector<std::uint32_t> printable;
+        printable.reserve(generated.size());
+        for (const auto token : generated) {
+            if (token == tokenizer.eos_token_id()) break;
+            printable.push_back(token);
+        }
+        std::cout << tokenizer.decode(printable) << '\n';
+        std::cerr << "model_load_ms=" << milliseconds(static_cast<std::uint64_t>(load_time)) << '\n'
+                  << "prompt_tokens=" << prompt_tokens.size() << '\n'
+                  << "generated_tokens=" << generation_stats.generated_tokens << '\n'
+                  << "prefill_ms=" << milliseconds(generation_stats.prefill_time_ns) << '\n'
+                  << "prefill_tokens_per_second="
+                  << tokens_per_second(prompt_tokens.size(), generation_stats.prefill_time_ns) << '\n'
+                  << "decode_ms=" << milliseconds(generation_stats.decode_time_ns) << '\n'
+                  << "decode_tokens_per_second="
+                  << tokens_per_second(generation_stats.generated_tokens,
+                                       generation_stats.decode_time_ns) << '\n'
+                  << "model_bytes_read=" << bytes_read << '\n'
+                  << "expert_cache_capacity_bytes=" << cache.capacity_bytes << '\n'
+                  << "expert_cache_resident_bytes=" << cache.resident_bytes << '\n'
+                  << "expert_cache_bytes_read=" << cache.bytes_read << '\n'
+                  << "expert_cache_read_operations=" << cache.read_operations << '\n'
+                  << "expert_cache_read_time_ms=" << milliseconds(cache.read_time_ns) << '\n'
+                  << "expert_cache_hits=" << cache.hits << '\n'
+                  << "expert_cache_misses=" << cache.misses << '\n';
+        if (cache.hits + cache.misses != 0) {
+            std::cerr << "expert_cache_hit_percent="
+                      << 100.0 * static_cast<double>(cache.hits) /
+                             static_cast<double>(cache.hits + cache.misses)
+                      << '\n';
+        }
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "pokitlms-bench: " << error.what() << '\n';
+        return 1;
+    }
+}

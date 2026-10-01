@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(PokitLMs VERSION 0.1.0 LANGUAGES CXX)
+project(PokitLMs VERSION 0.2.0 LANGUAGES CXX)
 
 find_package(Threads REQUIRED)
 
 option(POKITLMS_BUILD_TESTS "Build PokitLMs tests" ON)
+option(POKITLMS_BUILD_BENCHMARK "Build the model-backed inference benchmark CLI" ON)
 
 add_library(pokitlms
     src/tensor.cpp
@@ -48,4 +49,9 @@ if(POKITLMS_BUILD_TESTS)
     add_executable(pokitlms_tests tests/smoke_test.cpp)
     target_link_libraries(pokitlms_tests PRIVATE PokitLMs::pokitlms)
     add_test(NAME pokitlms_smoke COMMAND pokitlms_tests)
+endif()
+
+if(POKITLMS_BUILD_BENCHMARK)
+    add_executable(pokitlms-bench tools/benchmark.cpp)
+    target_link_libraries(pokitlms-bench PRIVATE PokitLMs::pokitlms)
 endif()

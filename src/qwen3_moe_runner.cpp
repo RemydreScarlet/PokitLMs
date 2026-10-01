@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <deque>
@@ -508,7 +509,9 @@ public:
 
     std::vector<std::uint32_t> generate(std::span<const std::uint32_t> prompt,
                                         std::size_t max_new_tokens,
-                                        const GenerationOptions& options) {
+                                        const GenerationOptions& options,
+                                        GenerationStats* stats = nullptr) {
+        if (stats) *stats = {};
         reset();
         if (prompt.empty()) throw std::invalid_argument("generation prompt must contain at least one token");
         if (prompt.size() > model_context || max_new_tokens > model_context - prompt.size()) {
@@ -519,9 +522,16 @@ public:
         if (max_new_tokens == 0) return generated;
         std::vector<float> logits;
         try {
+            const auto prefill_start = std::chrono::steady_clock::now();
             for (std::size_t i = 0; i < prompt.size(); ++i) {
                 logits = forward(prompt[i], i, i + 1 == prompt.size());
             }
+            if (stats) {
+                stats->prefill_time_ns = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - prefill_start).count());
+            }
+            const auto decode_start = std::chrono::steady_clock::now();
             std::mt19937_64 random(options.seed);
             generated.reserve(max_new_tokens);
             for (std::size_t i = 0; i < max_new_tokens; ++i) {
@@ -530,6 +540,12 @@ public:
                 history.push_back(token);
                 if (token == tokenizer.eos_token_id()) break;
                 if (i + 1 < max_new_tokens) logits = forward(token, prompt.size() + i);
+            }
+            if (stats) {
+                stats->decode_time_ns = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - decode_start).count());
+                stats->generated_tokens = generated.size();
             }
         } catch (...) {
             reset();
@@ -556,9 +572,9 @@ std::vector<float> Qwen3MoeRunner::forward_token(std::uint32_t token_id, std::ui
 }
 std::vector<std::uint32_t> Qwen3MoeRunner::generate_tokens(
     std::span<const std::uint32_t> prompt, std::size_t max_new_tokens,
-    const GenerationOptions& options) {
+    const GenerationOptions& options, GenerationStats* stats) {
     if (!impl_) throw std::logic_error("Qwen3-MoE runner has been moved from");
-    return impl_->generate(prompt, max_new_tokens, options);
+    return impl_->generate(prompt, max_new_tokens, options, stats);
 }
 std::string Qwen3MoeRunner::generate_text(std::string_view prompt, std::size_t max_new_tokens,
                                           const GenerationOptions& options) {
