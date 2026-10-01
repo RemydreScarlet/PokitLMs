@@ -102,6 +102,8 @@ KvCache::KvCache(std::size_t capacity, std::size_t kv_heads,
                           ? checked_product(checked_product(capacity, kv_heads), key_dimension / 32) : 0),
       values_q8_scales_(precision == KvCachePrecision::Q8_0
                             ? checked_product(checked_product(capacity, kv_heads), value_dimension / 32) : 0),
+      decoded_key_scratch_(precision == KvCachePrecision::Float16 ? key_dimension : 0),
+      decoded_value_scratch_(precision == KvCachePrecision::Float16 ? value_dimension : 0),
       key_blocks_per_head_(key_dimension / 32), value_blocks_per_head_(value_dimension / 32),
       scores_(capacity) {
     if (capacity == 0 || kv_heads == 0 || key_dimension == 0 || value_dimension == 0) {
@@ -188,8 +190,6 @@ void KvCache::attend(const float* query, std::size_t query_count, float* output,
     if (!std::isfinite(scale) || scale <= 0.0F) throw std::invalid_argument("attention scale must be positive");
 
     const auto group_size = query_heads / kv_heads_;
-    std::vector<float> decoded_key(precision_ == KvCachePrecision::Float16 ? key_dimension_ : 0);
-    std::vector<float> decoded_value(precision_ == KvCachePrecision::Float16 ? value_dimension_ : 0);
     for (std::size_t head = 0; head < query_heads; ++head) {
         const auto kv_head = head / group_size;
         const auto* q = query + head * key_dimension_;
@@ -211,9 +211,9 @@ void KvCache::attend(const float* query, std::size_t query_count, float* output,
                 const float* key = nullptr;
                 if (precision_ == KvCachePrecision::Float16) {
                     for (std::size_t d = 0; d < key_dimension_; ++d) {
-                        decoded_key[d] = half_to_float(keys_f16_[key_offset + d]);
+                        decoded_key_scratch_[d] = half_to_float(keys_f16_[key_offset + d]);
                     }
-                    key = decoded_key.data();
+                    key = decoded_key_scratch_.data();
                 } else key = keys_.data() + key_offset;
                 score = detail::dot_f32(q, key, key_dimension_);
             }
@@ -247,9 +247,9 @@ void KvCache::attend(const float* query, std::size_t query_count, float* output,
                 const float* value = nullptr;
                 if (precision_ == KvCachePrecision::Float16) {
                     for (std::size_t d = 0; d < value_dimension_; ++d) {
-                        decoded_value[d] = half_to_float(values_f16_[value_offset + d]);
+                        decoded_value_scratch_[d] = half_to_float(values_f16_[value_offset + d]);
                     }
-                    value = decoded_value.data();
+                    value = decoded_value_scratch_.data();
                 } else value = values_.data() + value_offset;
                 detail::scale_add_f32(out, value, probability, value_dimension_);
             }
@@ -266,6 +266,7 @@ std::size_t KvCache::storage_bytes() const noexcept {
            (keys_f16_.size() + values_f16_.size() + keys_q8_scales_.size() +
             values_q8_scales_.size()) * sizeof(std::uint16_t) +
            (keys_q8_.size() + values_q8_.size()) * sizeof(std::int8_t) +
+           (decoded_key_scratch_.size() + decoded_value_scratch_.size()) * sizeof(float) +
            scores_.size() * sizeof(float);
 }
 void KvCache::clear() noexcept {
