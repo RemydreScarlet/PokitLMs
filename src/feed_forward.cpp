@@ -69,44 +69,61 @@ void moe_swi_glu(
     const std::vector<MoeExpert>& experts,
     std::size_t top_k,
     std::span<float> output) {
-    if (input.empty() || output.size() != input.size() || experts.empty() ||
-        top_k == 0 || top_k > experts.size() ||
-        router_weights.size() != matrix_size(experts.size(), input.size())) {
-        throw std::invalid_argument("invalid MoE dimensions or top_k");
+    if (experts.empty()) throw std::invalid_argument("MoE requires at least one expert");
+    const MoeExpertRunner runner = [&experts](std::size_t id, std::span<const float> values,
+                                               std::span<float> result) {
+        run_expert(values, experts[id].weights, result);
+    };
+    moe_swi_glu_streaming(input, router_weights, experts.size(), top_k, runner, output);
+}
+
+void moe_swi_glu_streaming(
+    std::span<const float> input,
+    std::span<const float> router_weights,
+    std::size_t expert_count,
+    std::size_t top_k,
+    const MoeExpertRunner& runner,
+    std::span<float> output) {
+    if (input.empty() || output.size() != input.size() || expert_count == 0 ||
+        top_k == 0 || top_k > expert_count || !runner ||
+        router_weights.size() != matrix_size(expert_count, input.size())) {
+        throw std::invalid_argument("invalid streaming MoE dimensions or top_k");
     }
 
-    std::vector<float> logits(experts.size());
-    for (std::size_t expert = 0; expert < experts.size(); ++expert) {
+    struct Route { float logit; std::size_t id; };
+    std::vector<Route> selected;
+    selected.reserve(top_k);
+    for (std::size_t expert = 0; expert < expert_count; ++expert) {
         const auto offset = expert * input.size();
+        float logit = 0.0F;
         for (std::size_t column = 0; column < input.size(); ++column) {
-            logits[expert] += router_weights[offset + column] * input[column];
+            logit += router_weights[offset + column] * input[column];
+        }
+        const Route candidate{logit, expert};
+        const auto where = std::lower_bound(selected.begin(), selected.end(), candidate,
+            [](const Route& lhs, const Route& rhs) {
+                return lhs.logit > rhs.logit || (lhs.logit == rhs.logit && lhs.id < rhs.id);
+            });
+        if (selected.size() < top_k) selected.insert(where, candidate);
+        else if (where != selected.end()) {
+            selected.insert(where, candidate);
+            selected.pop_back();
         }
     }
 
-    std::vector<std::size_t> selected(experts.size());
-    for (std::size_t i = 0; i < selected.size(); ++i) selected[i] = i;
-    std::partial_sort(selected.begin(), selected.begin() + static_cast<std::ptrdiff_t>(top_k),
-                      selected.end(), [&logits](std::size_t lhs, std::size_t rhs) {
-                          return logits[lhs] > logits[rhs];
-                      });
-    selected.resize(top_k);
-
-    const float max_logit = logits[selected.front()];
-    float normalization = 0.0F;
+    const float max_logit = selected.front().logit;
     std::vector<float> route_weights(top_k);
+    float normalization = 0.0F;
     for (std::size_t i = 0; i < top_k; ++i) {
-        route_weights[i] = std::exp(logits[selected[i]] - max_logit);
+        route_weights[i] = std::exp(selected[i].logit - max_logit);
         normalization += route_weights[i];
     }
-
     std::vector<float> result(output.size(), 0.0F);
     std::vector<float> expert_output(output.size());
     for (std::size_t i = 0; i < top_k; ++i) {
-        run_expert(input, experts[selected[i]].weights, expert_output);
+        runner(selected[i].id, input, expert_output);
         const float scale = route_weights[i] / normalization;
-        for (std::size_t j = 0; j < output.size(); ++j) {
-            result[j] += scale * expert_output[j];
-        }
+        for (std::size_t j = 0; j < output.size(); ++j) result[j] += scale * expert_output[j];
     }
     std::copy(result.begin(), result.end(), output.begin());
 }
