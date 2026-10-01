@@ -58,7 +58,8 @@ public:
     explicit Qwen3MoeRunner(std::filesystem::path model_path,
                             std::size_t expert_cache_budget_bytes = 128U * 1024U * 1024U,
                             std::size_t context_capacity = 0,
-                            KvCachePrecision kv_precision = KvCachePrecision::Float16); // FP16 by default.
+                            KvCachePrecision kv_precision = KvCachePrecision::Float16,
+                            std::size_t expert_io_threads = 3); // FP16 and 3 I/O workers by default.
     ~Qwen3MoeRunner();
     Qwen3MoeRunner(Qwen3MoeRunner&&) noexcept;
     Qwen3MoeRunner& operator=(Qwen3MoeRunner&&) noexcept;

@@ -73,14 +73,20 @@ decode throughput, total bytes read, and expert-cache latency and hit rate. It
 is built by default for host and Android builds:
 
 ```bash
-./build/pokitlms-bench MODEL.gguf "Explain MoE routing" 64 auto 512 q8
+./build/pokitlms-bench MODEL.gguf "Explain MoE routing" 64 auto 512 q8 3
 ```
 
 The positional options are generated token limit, expert-cache MiB (`auto`
 uses one quarter of currently available memory, capped at 4 GiB), KV
-window size, and KV precision (`fp16` or `q8`). A KV window of zero selects
-the mobile default. The output reply
+window size, KV precision (`fp16` or `q8`), and expert I/O workers (`1` to `4`).
+Tune I/O workers for the device's storage; the default is `3`. A KV window of
+zero selects the mobile default. The output reply
 goes to stdout and the measurements go to stderr.
+
+The C++ runner accepts the worker count as its final constructor argument.
+The C API exposes the same setting through
+`pokitlms_qwen3moe_create_ex_with_io_threads`; existing create functions keep
+the default of three workers.
 
 ## Near-term backend work
 

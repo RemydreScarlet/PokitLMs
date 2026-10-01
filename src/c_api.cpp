@@ -11,8 +11,9 @@
 
 struct pokitlms_model {
     explicit pokitlms_model(std::filesystem::path path, std::size_t cache_bytes,
-                            std::size_t context, pokitlms::KvCachePrecision kv_precision)
-        : runner(std::move(path), cache_bytes, context, kv_precision) {}
+                            std::size_t context, pokitlms::KvCachePrecision kv_precision,
+                            std::size_t expert_io_threads)
+        : runner(std::move(path), cache_bytes, context, kv_precision, expert_io_threads) {}
     pokitlms::model::Qwen3MoeRunner runner;
 };
 
@@ -56,6 +57,15 @@ pokitlms_status pokitlms_qwen3moe_create_ex(
     const char* model_path, size_t expert_cache_budget_bytes, size_t context_capacity,
     pokitlms_kv_cache_precision kv_precision, pokitlms_model** out_model,
     char* error_buffer, size_t error_capacity) {
+    return pokitlms_qwen3moe_create_ex_with_io_threads(
+        model_path, expert_cache_budget_bytes, context_capacity, kv_precision, 3,
+        out_model, error_buffer, error_capacity);
+}
+
+pokitlms_status pokitlms_qwen3moe_create_ex_with_io_threads(
+    const char* model_path, size_t expert_cache_budget_bytes, size_t context_capacity,
+    pokitlms_kv_cache_precision kv_precision, size_t expert_io_threads,
+    pokitlms_model** out_model, char* error_buffer, size_t error_capacity) {
     if (out_model) *out_model = nullptr;
     if (!model_path || model_path[0] == '\0' || !out_model) {
         set_error(error_buffer, error_capacity, "model path and output handle are required");
@@ -70,7 +80,7 @@ pokitlms_status pokitlms_qwen3moe_create_ex(
     }
     try {
         *out_model = new pokitlms_model(model_path, expert_cache_budget_bytes,
-                                        context_capacity, precision);
+                                        context_capacity, precision, expert_io_threads);
         set_error(error_buffer, error_capacity, "");
         return POKITLMS_STATUS_OK;
     } catch (const std::invalid_argument& error) {

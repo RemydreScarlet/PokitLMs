@@ -38,13 +38,13 @@ double tokens_per_second(std::size_t tokens, std::uint64_t nanoseconds) {
 
 void print_usage(const char* executable) {
     std::cerr << "Usage: " << executable
-              << " MODEL.gguf USER_MESSAGE [new_tokens=32] [expert_cache_mib=auto|128] [kv_window=0] [kv_precision=fp16|q8]\n";
+              << " MODEL.gguf USER_MESSAGE [new_tokens=32] [expert_cache_mib=auto|128] [kv_window=0] [kv_precision=fp16|q8] [expert_io_threads=3]\n";
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3 || argc > 7) {
+    if (argc < 3 || argc > 8) {
         print_usage(argv[0]);
         return 2;
     }
@@ -61,6 +61,10 @@ int main(int argc, char** argv) {
             if (name == "q8") kv_precision = pokitlms::KvCachePrecision::Q8_0;
             else if (name != "fp16") throw std::invalid_argument("KV precision must be fp16 or q8");
         }
+        const auto expert_io_threads = argc > 7 ? parse_size(argv[7], "expert I/O thread count") : 3;
+        if (expert_io_threads == 0 || expert_io_threads > 4) {
+            throw std::invalid_argument("expert I/O thread count must be between 1 and 4");
+        }
         constexpr std::size_t mib = 1024U * 1024U;
         if (cache_mib > std::numeric_limits<std::size_t>::max() / mib) {
             throw std::invalid_argument("expert cache MiB value is too large");
@@ -74,7 +78,7 @@ int main(int argc, char** argv) {
         const auto cache_budget = auto_cache
             ? pokitlms::model::kAutoExpertCacheBudget : cache_mib * mib;
         pokitlms::model::Qwen3MoeRunner runner(model_path, cache_budget, kv_window,
-                                                kv_precision);
+                                                kv_precision, expert_io_threads);
         const auto load_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - load_start).count();
 
@@ -114,7 +118,8 @@ int main(int argc, char** argv) {
                   << "expert_cache_read_operations=" << cache.read_operations << '\n'
                   << "expert_cache_read_time_ms=" << milliseconds(cache.read_time_ns) << '\n'
                   << "expert_cache_hits=" << cache.hits << '\n'
-                  << "expert_cache_misses=" << cache.misses << '\n';
+                  << "expert_cache_misses=" << cache.misses << '\n'
+                  << "expert_io_threads=" << expert_io_threads << '\n';
         std::cerr << "kv_precision=" << (kv_precision == pokitlms::KvCachePrecision::Q8_0 ? "q8" : "fp16") << '\n';
         if (cache.hits + cache.misses != 0) {
             std::cerr << "expert_cache_hit_percent="

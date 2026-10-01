@@ -181,6 +181,12 @@ struct ExpertWeights {
     std::shared_ptr<const std::vector<std::byte>> down;
 };
 
+struct PendingExpertWeights {
+    std::future<std::shared_ptr<const std::vector<std::byte>>> gate;
+    std::future<std::shared_ptr<const std::vector<std::byte>>> up;
+    std::future<std::shared_ptr<const std::vector<std::byte>>> down;
+};
+
 struct SamplingScratch {
     std::vector<float> adjusted_logits;
     std::vector<bool> seen_tokens;
@@ -190,10 +196,13 @@ struct SamplingScratch {
 
 class ExpertLoader {
 public:
-    ExpertLoader() {
-        workers_.reserve(kWorkerCount);
+    explicit ExpertLoader(std::size_t worker_count) {
+        if (worker_count == 0 || worker_count > 4) {
+            throw std::invalid_argument("expert I/O thread count must be between 1 and 4");
+        }
+        workers_.reserve(worker_count);
         try {
-            for (std::size_t i = 0; i < kWorkerCount; ++i) {
+            for (std::size_t i = 0; i < worker_count; ++i) {
                 workers_.emplace_back([this] { run(); });
             }
         } catch (...) {
@@ -246,9 +255,6 @@ private:
         }
     }
 
-    // One worker executes the expert batch and reads gate weights directly;
-    // the other two workers read up/down weights concurrently.
-    static constexpr std::size_t kWorkerCount = 3;
     std::mutex mutex_;
     std::condition_variable ready_;
     std::deque<std::function<void()>> tasks_;
@@ -427,10 +433,11 @@ public:
     };
 
     Impl(std::filesystem::path path, std::size_t cache_budget, std::size_t requested_context,
-         KvCachePrecision kv_precision)
+         KvCachePrecision kv_precision, std::size_t expert_io_threads)
         : model_path(std::move(path)), gguf(model_path),
           file(std::make_shared<storage::ModelFile>(model_path)), index(gguf), tokenizer(gguf),
-          embedding_reader(file, index.token_embedding()), output_reader(file, index.output()) {
+          embedding_reader(file, index.token_embedding()), output_reader(file, index.output()),
+          expert_loader(expert_io_threads) {
         const auto& config = index.config();
         model_context = as_size(config.context_length, "context_length");
         // Keep KV residency bounded for mobile devices. The ring retains the most
@@ -643,25 +650,24 @@ public:
                 const auto& up_slices = expert_slices[layer][1];
                 const auto& down_slices = expert_slices[layer][2];
                 const auto load_expert = [this, layer](std::size_t expert_id) {
-                    auto up = expert_loader.submit([this, layer, expert_id] {
-                        return up_stores[layer]->get(expert_id);
-                    });
-                    auto down = expert_loader.submit([this, layer, expert_id] {
-                        return down_stores[layer]->get(expert_id);
-                    });
-                    auto gate = gate_stores[layer]->get(expert_id);
-                    return ExpertWeights{std::move(gate), up.get(), down.get()};
+                    return PendingExpertWeights{
+                        expert_loader.submit([this, layer, expert_id] {
+                            return gate_stores[layer]->get(expert_id);
+                        }),
+                        expert_loader.submit([this, layer, expert_id] {
+                            return up_stores[layer]->get(expert_id);
+                        }),
+                        expert_loader.submit([this, layer, expert_id] {
+                            return down_stores[layer]->get(expert_id);
+                        })};
                 };
-                auto pending_weights = expert_loader.submit(
-                    [load_expert, expert_id = routes.front().id] { return load_expert(expert_id); });
+                auto pending_weights = load_expert(routes.front().id);
                 for (std::size_t route_index = 0; route_index < routes.size(); ++route_index) {
                     const auto& route = routes[route_index];
-                    auto weights = pending_weights.get();
+                    ExpertWeights weights{pending_weights.gate.get(), pending_weights.up.get(),
+                                          pending_weights.down.get()};
                     if (route_index + 1 < routes.size()) {
-                        pending_weights = expert_loader.submit(
-                            [load_expert, expert_id = routes[route_index + 1].id] {
-                                return load_expert(expert_id);
-                            });
+                        pending_weights = load_expert(routes[route_index + 1].id);
                     }
                     TensorReader gate_reader(expert_view(block.expert_gate, gate_slices[route.id]), weights.gate);
                     TensorReader up_reader(expert_view(block.expert_up, up_slices[route.id]), weights.up);
@@ -816,9 +822,10 @@ public:
 Qwen3MoeRunner::Qwen3MoeRunner(std::filesystem::path model_path,
                                std::size_t expert_cache_budget_bytes,
                                std::size_t context_capacity,
-                               KvCachePrecision kv_precision) {
+                               KvCachePrecision kv_precision,
+                               std::size_t expert_io_threads) {
     impl_ = std::make_unique<Impl>(std::move(model_path), expert_cache_budget_bytes,
-                                   context_capacity, kv_precision);
+                                   context_capacity, kv_precision, expert_io_threads);
 }
 
 Qwen3MoeRunner::~Qwen3MoeRunner() = default;

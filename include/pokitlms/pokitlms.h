@@ -67,6 +67,11 @@ pokitlms_status pokitlms_qwen3moe_create_ex(
     const char* model_path, size_t expert_cache_budget_bytes, size_t context_capacity,
     pokitlms_kv_cache_precision kv_precision, pokitlms_model** out_model,
     char* error_buffer, size_t error_capacity);
+// Extended constructor with explicit expert weight I/O concurrency (1 to 4).
+pokitlms_status pokitlms_qwen3moe_create_ex_with_io_threads(
+    const char* model_path, size_t expert_cache_budget_bytes, size_t context_capacity,
+    pokitlms_kv_cache_precision kv_precision, size_t expert_io_threads,
+    pokitlms_model** out_model, char* error_buffer, size_t error_capacity);
 void pokitlms_model_destroy(pokitlms_model* model);
 
 // Generates UTF-8 output from a raw prompt; supply any chat-template markers in
