@@ -49,6 +49,48 @@ std::uint32_t read_u32(const std::byte* bytes) {
            (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[3])) << 24);
 }
 
+void decode_q4_1(const std::byte* block, std::array<float, 32>& values) {
+    const float d = half_to_float(read_u16(block));
+    const float minimum = half_to_float(read_u16(block + 2));
+    const auto* quant = block + 4;
+    for (std::size_t i = 0; i < 16; ++i) {
+        const auto packed = std::to_integer<std::uint8_t>(quant[i]);
+        values[i] = static_cast<float>(packed & 0x0fU) * d + minimum;
+        values[i + 16] = static_cast<float>(packed >> 4) * d + minimum;
+    }
+}
+
+void decode_q5_0(const std::byte* block, std::array<float, 32>& values) {
+    const float d = half_to_float(read_u16(block));
+    const auto high_bits = read_u32(block + 2);
+    const auto* quant = block + 6;
+    for (std::size_t i = 0; i < 16; ++i) {
+        const auto packed = std::to_integer<std::uint8_t>(quant[i]);
+        const auto low = static_cast<int>(packed & 0x0fU);
+        const auto high = static_cast<int>(packed >> 4);
+        const auto q0 = low | static_cast<int>(((high_bits >> i) & 1U) << 4);
+        const auto q1 = high | static_cast<int>(((high_bits >> (i + 16)) & 1U) << 4);
+        values[i] = static_cast<float>(q0 - 16) * d;
+        values[i + 16] = static_cast<float>(q1 - 16) * d;
+    }
+}
+
+void decode_q5_1(const std::byte* block, std::array<float, 32>& values) {
+    const float d = half_to_float(read_u16(block));
+    const float minimum = half_to_float(read_u16(block + 2));
+    const auto high_bits = read_u32(block + 4);
+    const auto* quant = block + 8;
+    for (std::size_t i = 0; i < 16; ++i) {
+        const auto packed = std::to_integer<std::uint8_t>(quant[i]);
+        const auto low = static_cast<unsigned>(packed & 0x0fU) |
+            static_cast<unsigned>((high_bits >> i) & 1U) << 4;
+        const auto high = static_cast<unsigned>(packed >> 4) |
+            static_cast<unsigned>((high_bits >> (i + 16)) & 1U) << 4;
+        values[i] = static_cast<float>(low) * d + minimum;
+        values[i + 16] = static_cast<float>(high) * d + minimum;
+    }
+}
+
 void decode_q2_k(const std::byte* block, std::array<float, 256>& values) {
     const auto* scales = block;
     const auto* quants = block + 16;
@@ -337,6 +379,24 @@ void dequantize_quantized_row(std::uint32_t type,
         }
         return;
     }
+    if (type == 3 || type == 6 || type == 7) {
+        constexpr std::size_t block_elements = 32;
+        const std::size_t block_bytes = type == 3 ? 20 : type == 6 ? 22 : 24;
+        if (output.empty() || output.size() % block_elements != 0 ||
+            encoded.size() != output.size() / block_elements * block_bytes) {
+            throw std::invalid_argument("invalid Q4_1/Q5_0/Q5_1 row dimensions");
+        }
+        std::array<float, block_elements> decoded{};
+        for (std::size_t block = 0; block < output.size() / block_elements; ++block) {
+            const auto* data = encoded.data() + block * block_bytes;
+            if (type == 3) decode_q4_1(data, decoded);
+            else if (type == 6) decode_q5_0(data, decoded);
+            else decode_q5_1(data, decoded);
+            std::copy(decoded.begin(), decoded.end(), output.begin() +
+                      static_cast<std::ptrdiff_t>(block * block_elements));
+        }
+        return;
+    }
     if (type == 10 || type == 11 || type == 12 || type == 13 || type == 14) {
         constexpr std::size_t block_elements = 256;
         const std::size_t block_bytes = type == 10 ? 84 : type == 11 ? 110 :
@@ -367,6 +427,24 @@ void linear_q4_0(std::span<const float> input,
                  std::span<const float> bias,
                  std::span<float> output) {
     linear_quantized<true>(input, weights, output_features, bias, output);
+}
+
+void linear_q4_1(std::span<const float> input, std::span<const std::byte> weights,
+                 std::size_t output_features, std::span<const float> bias,
+                 std::span<float> output) {
+    linear_k<32, 20>(input, weights, output_features, bias, output, decode_q4_1);
+}
+
+void linear_q5_0(std::span<const float> input, std::span<const std::byte> weights,
+                 std::size_t output_features, std::span<const float> bias,
+                 std::span<float> output) {
+    linear_k<32, 22>(input, weights, output_features, bias, output, decode_q5_0);
+}
+
+void linear_q5_1(std::span<const float> input, std::span<const std::byte> weights,
+                 std::size_t output_features, std::span<const float> bias,
+                 std::span<float> output) {
+    linear_k<32, 24>(input, weights, output_features, bias, output, decode_q5_1);
 }
 
 void linear_q8_0(std::span<const float> input,
