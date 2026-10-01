@@ -9,6 +9,9 @@
 namespace pokitlms::model {
 namespace {
 
+constexpr bool kDirectF32Read = std::endian::native == std::endian::little &&
+    sizeof(float) == sizeof(std::uint32_t) && std::numeric_limits<float>::is_iec559;
+
 std::uint16_t read_u16(const std::byte* bytes) {
     return static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes[0])) |
            static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes[1]) << 8);
@@ -149,7 +152,8 @@ std::vector<float> TensorReader::read_float_rows(std::uint64_t first_row,
         throw std::length_error("tensor row read is too large");
     }
     std::vector<float> values(static_cast<std::size_t>(tensor_.dimensions.front()) * rows);
-    std::vector<std::byte> encoded(row_bytes_ * rows);
+    std::vector<std::byte> encoded;
+    if (tensor_.type != 0 || !kDirectF32Read) encoded.resize(row_bytes_ * rows);
     read_float_rows_into(first_row, rows, values, encoded);
     return values;
 }
@@ -174,8 +178,7 @@ void TensorReader::read_float_rows_into(std::uint64_t first_row, std::size_t row
     if (values.size() != static_cast<std::size_t>(elements_per_row) * rows) {
         throw std::invalid_argument("float tensor destination has the wrong size");
     }
-    if (tensor_.type == 0 && std::endian::native == std::endian::little &&
-        sizeof(float) == sizeof(std::uint32_t) && std::numeric_limits<float>::is_iec559) {
+    if (tensor_.type == 0 && kDirectF32Read) {
         read_rows_into(first_row, rows, std::as_writable_bytes(values));
         return;
     }
