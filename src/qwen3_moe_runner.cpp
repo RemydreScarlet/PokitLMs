@@ -246,6 +246,20 @@ std::uint32_t sample_token(std::span<const float> logits,
     if (logits.empty() || logits.size() > std::numeric_limits<std::uint32_t>::max()) {
         throw std::invalid_argument("invalid logits vocabulary size");
     }
+    if (options.temperature == 0.0F && options.repetition_penalty == 1.0F) {
+        std::size_t best_id = 0;
+        float best_logit = logits.front();
+        if (!std::isfinite(best_logit)) throw std::runtime_error("model produced non-finite logits");
+        for (std::size_t id = 1; id < logits.size(); ++id) {
+            const float logit = logits[id];
+            if (!std::isfinite(logit)) throw std::runtime_error("model produced non-finite logits");
+            if (logit > best_logit) {
+                best_logit = logit;
+                best_id = id;
+            }
+        }
+        return static_cast<std::uint32_t>(best_id);
+    }
     std::vector<float> adjusted(logits.begin(), logits.end());
     for (const float logit : adjusted) {
         if (!std::isfinite(logit)) throw std::runtime_error("model produced non-finite logits");
@@ -622,9 +636,13 @@ public:
                 reset();
             }
         }
-        std::vector<std::uint32_t> history(prompt.begin(), prompt.end());
         std::vector<std::uint32_t> generated;
         if (max_new_tokens == 0) return generated;
+        std::vector<std::uint32_t> history;
+        if (options.repetition_penalty != 1.0F) {
+            history.assign(prompt.begin(), prompt.end());
+            history.reserve(prompt.size() + max_new_tokens);
+        }
         std::vector<float> logits = prefix_matches ? session_logits : std::vector<float>{};
         try {
             const auto prefill_start = std::chrono::steady_clock::now();
@@ -644,7 +662,7 @@ public:
             for (std::size_t i = 0; i < max_new_tokens; ++i) {
                 const auto token = sample_token(logits, history, options, random);
                 generated.push_back(token);
-                history.push_back(token);
+                if (options.repetition_penalty != 1.0F) history.push_back(token);
                 if (token == tokenizer.eos_token_id()) break;
                 if (i + 1 < max_new_tokens) {
                     logits = forward(token, prompt.size() + i);
