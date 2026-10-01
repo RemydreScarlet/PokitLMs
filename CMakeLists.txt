@@ -8,6 +8,7 @@ add_library(pokitlms
     src/tensor.cpp
     src/rms_norm.cpp
     src/linear.cpp
+    src/quantized_linear.cpp
     src/feed_forward.cpp
     src/rope.cpp
     src/expert_store.cpp
