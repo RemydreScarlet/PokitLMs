@@ -47,6 +47,23 @@ inline float dot_i8_f32(const float* lhs, const std::int8_t* quantized,
     return sum;
 }
 
+inline void unpack_q4_0(const std::uint8_t* packed, std::int8_t* decoded) noexcept {
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    const auto values = vld1q_u8(packed);
+    const auto low = vsubq_s8(vreinterpretq_s8_u8(vandq_u8(values, vdupq_n_u8(0x0f))),
+                              vdupq_n_s8(8));
+    const auto high = vsubq_s8(vreinterpretq_s8_u8(vshrq_n_u8(values, 4)),
+                               vdupq_n_s8(8));
+    vst1q_s8(decoded, low);
+    vst1q_s8(decoded + 16, high);
+#else
+    for (std::size_t i = 0; i < 16; ++i) {
+        decoded[i] = static_cast<std::int8_t>(static_cast<int>(packed[i] & 0x0fU) - 8);
+        decoded[i + 16] = static_cast<std::int8_t>(static_cast<int>(packed[i] >> 4) - 8);
+    }
+#endif
+}
+
 inline void rope_rotate_f32(float* first, float* second, const float* cosine,
                             const float* sine, std::size_t count) noexcept {
     std::size_t i = 0;

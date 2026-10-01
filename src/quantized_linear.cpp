@@ -331,18 +331,11 @@ void linear_quantized(std::span<const float> input,
             const auto input_offset = block * kBlockElements;
             if constexpr (Q4) {
                 std::array<std::int8_t, kBlockElements> decoded{};
-                for (std::size_t i = 0; i < 16; ++i) {
-                    const auto packed = std::to_integer<std::uint8_t>(quant[i]);
-                    decoded[i] = static_cast<std::int8_t>(static_cast<int>(packed & 0x0fU) - 8);
-                    decoded[i + 16] = static_cast<std::int8_t>(static_cast<int>(packed >> 4) - 8);
-                }
+                detail::unpack_q4_0(reinterpret_cast<const std::uint8_t*>(quant), decoded.data());
                 sum += scale * detail::dot_i8_f32(input.data() + input_offset, decoded.data(), kBlockElements);
             } else {
-                std::array<std::int8_t, kBlockElements> decoded{};
-                for (std::size_t i = 0; i < kBlockElements; ++i) {
-                    decoded[i] = static_cast<std::int8_t>(std::to_integer<std::uint8_t>(quant[i]));
-                }
-                sum += scale * detail::dot_i8_f32(input.data() + input_offset, decoded.data(), kBlockElements);
+                sum += scale * detail::dot_i8_f32(input.data() + input_offset,
+                    reinterpret_cast<const std::int8_t*>(quant), kBlockElements);
             }
         }
         output[row] = sum;
