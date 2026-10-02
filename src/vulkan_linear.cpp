@@ -656,7 +656,14 @@ public:
                 }
                 vkUpdateDescriptorSets(device, writes.size(), writes.data(), 0, nullptr);
             }
-            auto rows_per_tile = static_cast<std::size_t>(tile_bytes / row_bytes);
+            auto dispatch_tile_bytes = tile_bytes;
+            if (use_model_cache && properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+                // Resident weights do not use the mapped transfer-window size
+                // for compute; larger row batches reduce dispatch and fence overhead.
+                constexpr VkDeviceSize resident_dispatch_tile_bytes = 64ULL * 1024U * 1024U;
+                dispatch_tile_bytes = std::max(dispatch_tile_bytes, resident_dispatch_tile_bytes);
+            }
+            auto rows_per_tile = static_cast<std::size_t>(dispatch_tile_bytes / row_bytes);
             rows_per_tile = std::min<std::size_t>(rows_per_tile,
                 static_cast<std::size_t>(properties.limits.maxComputeWorkGroupCount[0]) * dispatch_rows_per_group);
             if (use_model_cache) counters.weight_bytes += *tensor.payload_size;

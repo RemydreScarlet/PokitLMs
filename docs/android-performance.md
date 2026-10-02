@@ -418,10 +418,11 @@ was not run through generation.
 
 ### Cached decode tile-size A/B on Qwen3.5-9B
 
-With whole-model caching active, changing the benchmark's `gpu_tile_mib`
-changes how many output rows each dispatch handles. All runs used the RTX
-2070 SUPER, prompt `hi`, and generated the same eight token IDs listed above.
-The 4 and 64 MiB settings were each repeated once; other sizes have one run.
+Before adding an automatic row-batch floor, whole-model-cache runs used the
+benchmark's `gpu_tile_mib` for both transfer windows and compute batching.
+All runs used the RTX 2070 SUPER, prompt `hi`, and generated the same eight
+token IDs listed above. The 4 and 64 MiB settings were each repeated once;
+other sizes have one run.
 
 | Tile MiB | Decode tokens/s | Dispatches, full run | Vulkan allocation |
 | ---: | ---: | ---: | ---: |
@@ -437,6 +438,19 @@ The 16 MiB default was within about 6% of the 64 MiB mean and used about
 100 MiB less Vulkan memory, so the default remains unchanged. These are host
 RTX results; they do not establish a better tile size for Mali or other phone
 GPUs. The Android 4 MiB default remains based on its earlier streaming runs.
+
+The backend now targets a 64 MiB compute batch when a discrete GPU has the
+complete model resident, subject to tensor size and Vulkan dispatch limits.
+The configured `gpu_tile_mib` still sets the
+two mapped transfer windows, so the 4 MiB Android setting does not allocate
+larger windows. On the same 9B prompt and RTX 2070 SUPER, two runs with a
+4 MiB transfer window produced 8.105 and 7.502 decode tokens/s (mean 7.804),
+with 4,072 dispatches and the same token IDs. The earlier 4 MiB batching runs
+averaged 5.54 tokens/s and used 20,664 dispatches. Vulkan allocation remained
+6.179 GB, so this reduced scheduling overhead without increasing staging
+memory. Upload and prefill varied with physical file reads and remain a
+separate cost. This policy is only enabled for resident models on discrete
+GPUs; integrated GPUs and streamed models keep their configured batch size.
 
 ### Numerical checks
 
