@@ -523,6 +523,26 @@ so its Q6_K cost must be profiled separately without inferring it from the
 whole-file format histogram. The captured run is
 `$HOME/.local/share/pokitlms-tools/logs/qwen35-9b-quant-profile-hi32-20261003.log`.
 
+### Workgroup-size A/B on Qwen3.5-9B
+
+Isolated builds changed the Vulkan workgroup from 128 threads to 64 or 256,
+keeping the RTX 2070 SUPER, `hi` prompt, vectorized Q4_K, 4 MiB transfer
+windows, and resident model cache. All completed the same 14-token greeting;
+the Vulkan matrix and dense/MoE smoke checks passed for both candidates.
+
+| Workgroup threads | Decode tokens/s | GPU time across 13 decode forwards |
+| ---: | ---: | ---: |
+| 128 | 8.14 | 691.6 ms |
+| 64 | 8.06 | 705.1 ms |
+| 256 | 8.04 | 701.6 ms |
+
+The smaller and larger workgroups did not improve end-to-end decode. Their
+decode-only shader timestamps were also about 2.0% and 1.4% higher than the
+128-thread run. The differences are small and each setting had one full-model
+run, so 128 remains the measured default rather than claiming a stable
+regression. Captures are
+`$HOME/.local/share/pokitlms-tools/logs/qwen35-9b-wg{64,256}-vectorized-hi32-20261003.log`.
+
 ### Rejected Q4_K integer-dot experiment
 
 An experimental Vulkan Q4_K path quantized each 32-value activation block to
