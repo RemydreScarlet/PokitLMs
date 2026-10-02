@@ -2,6 +2,7 @@
 
 #include "pokitlms/model/gguf_reader.hpp"
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -18,6 +19,7 @@ struct Qwen35Config {
     std::uint64_t attention_head_length{};
     std::uint64_t value_head_length{};
     std::uint64_t rotary_dimension{};
+    std::array<std::uint64_t, 4> rope_dimension_sections{};
     std::uint64_t ssm_conv_kernel{};
     std::uint64_t ssm_state_size{};
     std::uint64_t ssm_group_count{};

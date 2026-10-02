@@ -125,6 +125,8 @@ def make_qwen35_model() -> bytes:
     integer_metadata("qwen35.ssm.time_step_rank", 1)
     integer_metadata("qwen35.ssm.inner_size", 2)
     integer_metadata("qwen35.full_attention_interval", 2)
+    array_metadata("qwen35.rope.dimension_sections", 5,
+                   [struct.pack("<i", value) for value in (1, 0, 0, 0)])
     float_metadata("qwen35.attention.layer_norm_rms_epsilon", 1.0e-5)
     float_metadata("qwen35.rope.freq_base", 10000.0)
     metadata.append(("qwen35.tie_word_embeddings", u32(7) + b"\x00"))
@@ -146,13 +148,13 @@ def make_qwen35_model() -> bytes:
         tensors.append((name, dimensions, values))
 
     add("token_embd.weight", (4, vocab_size), [1.0, 0.0, 0.0, 0.0] * vocab_size)
-    add("output_norm.weight", (4,), [0.0] * 4)
+    add("output_norm.weight", (4,), [1.0] * 4)
     output_rows = [[0.0] * 4 for _ in range(vocab_size)]
     output_rows[ord("a")] = [1.0, 0.0, 0.0, 0.0]
     add("output.weight", (4, vocab_size), [value for row in output_rows for value in row])
 
-    add("blk.0.attn_norm.weight", (4,), [0.0] * 4)
-    add("blk.0.post_attention_norm.weight", (4,), [0.0] * 4)
+    add("blk.0.attn_norm.weight", (4,), [1.0] * 4)
+    add("blk.0.post_attention_norm.weight", (4,), [1.0] * 4)
     add("blk.0.ffn_gate.weight", (4, 4), [0.0] * 16)
     add("blk.0.ffn_up.weight", (4, 4), [0.0] * 16)
     add("blk.0.ffn_down.weight", (4, 4), [0.0] * 16)
@@ -166,16 +168,16 @@ def make_qwen35_model() -> bytes:
     add("blk.0.ssm_norm.weight", (2,), [1.0] * 2)
     add("blk.0.ssm_out.weight", (2, 4), [0.0] * 8)
 
-    add("blk.1.attn_norm.weight", (4,), [0.0] * 4)
-    add("blk.1.post_attention_norm.weight", (4,), [0.0] * 4)
+    add("blk.1.attn_norm.weight", (4,), [1.0] * 4)
+    add("blk.1.post_attention_norm.weight", (4,), [1.0] * 4)
     add("blk.1.ffn_gate.weight", (4, 4), [0.0] * 16)
     add("blk.1.ffn_up.weight", (4, 4), [0.0] * 16)
     add("blk.1.ffn_down.weight", (4, 4), [0.0] * 16)
     add("blk.1.attn_q.weight", (4, 4), [0.0] * 16)
     add("blk.1.attn_k.weight", (4, 2), [0.0] * 8)
     add("blk.1.attn_v.weight", (4, 2), [0.0] * 8)
-    add("blk.1.attn_q_norm.weight", (2,), [0.0] * 2)
-    add("blk.1.attn_k_norm.weight", (2,), [0.0] * 2)
+    add("blk.1.attn_q_norm.weight", (2,), [1.0] * 2)
+    add("blk.1.attn_k_norm.weight", (2,), [1.0] * 2)
     add("blk.1.attn_output.weight", (2, 4), [0.0] * 8)
 
     return encode_gguf(metadata, tensors)

@@ -1,5 +1,6 @@
 #include "pokitlms/kv_cache.hpp"
 #include "pokitlms/ops/attention.hpp"
+#include "pokitlms/ops/gated_delta_net.hpp"
 #include "pokitlms/ops/linear.hpp"
 #include "pokitlms/ops/rms_norm.hpp"
 #include "pokitlms/ops/rope.hpp"
@@ -111,6 +112,28 @@ void test_attention_decode() {
     assert(nearly_equal(output[1], expected1, 1.0e-4F));
 }
 
+void test_gated_delta_state_layout() {
+    const float query[] = {1.0F, 0.0F};
+    const float key[] = {1.0F, 0.0F};
+    const float value[] = {2.0F, 4.0F};
+    const float log_decay[] = {0.0F};
+    const float beta[] = {0.5F};
+    float state[] = {0.0F, 0.0F, 0.0F, 0.0F};
+    float output[] = {0.0F, 0.0F};
+    pokitlms::GatedDeltaNetScratch scratch;
+
+    pokitlms::gated_delta_recurrent_step(query, key, value, log_decay, beta,
+                                          1, 2, 2, state, output, scratch);
+
+    const float inverse_sqrt_two = 1.0F / std::sqrt(2.0F);
+    assert(nearly_equal(output[0], inverse_sqrt_two));
+    assert(nearly_equal(output[1], 2.0F * inverse_sqrt_two));
+    assert(nearly_equal(state[0], 1.0F));
+    assert(nearly_equal(state[1], 0.0F));
+    assert(nearly_equal(state[2], 2.0F));
+    assert(nearly_equal(state[3], 0.0F));
+}
+
 }  // namespace
 
 int main() {
@@ -120,5 +143,6 @@ int main() {
     test_rope();
     test_kv_cache();
     test_attention_decode();
+    test_gated_delta_state_layout();
     return 0;
 }

@@ -4,12 +4,32 @@ import android.os.ParcelFileDescriptor
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class AndroidInferenceSmokeTest {
+    @Test
+    fun loadsCallerProvidedFullModelWhenConfigured() {
+        val modelPath = InstrumentationRegistry.getArguments().getString("pokitlms.modelPath")
+        assumeTrue("set pokitlms.modelPath to run the full-model device check", !modelPath.isNullOrBlank())
+        val model = File(modelPath!!)
+        check(model.isFile) { "model file does not exist: $modelPath" }
+
+        val bridge = NativeModelBridge()
+        ParcelFileDescriptor.open(model, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+            val handle = bridge.load(descriptor.fd)
+            try {
+                assertTrue(bridge.generate(handle, "hi", 1).isNotEmpty())
+            } finally {
+                bridge.close(handle)
+            }
+        }
+    }
+
     @Test
     fun loadsBothGgufRunnersThroughJniAndGeneratesOnDevice() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

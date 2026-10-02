@@ -34,6 +34,18 @@ std::uint64_t optional_u64(const GgufReader& model, const std::string& key,
     return found == model.metadata().end() ? fallback : as_u64(found->second, key);
 }
 
+std::array<std::uint64_t, 4> require_u64_array4(const GgufReader& model,
+                                               const std::string& key) {
+    const auto& value = require_value(model, key);
+    const auto* array = std::get_if<MetadataValue::Array>(&value.value);
+    if (!array || array->size() != 4) {
+        throw std::runtime_error("GGUF metadata has wrong array shape: " + key);
+    }
+    std::array<std::uint64_t, 4> result{};
+    for (std::size_t i = 0; i < result.size(); ++i) result[i] = as_u64((*array)[i], key);
+    return result;
+}
+
 double require_number(const GgufReader& model, const std::string& key) {
     const auto& value = require_value(model, key);
     if (const auto* number = std::get_if<double>(&value.value)) return *number;
@@ -104,6 +116,7 @@ Qwen35Config load_config(const GgufReader& model) {
     config.value_head_length = optional_u64(model, key("attention.value_length"),
                                              config.attention_head_length);
     config.rotary_dimension = require_u64(model, key("rope.dimension_count"));
+    config.rope_dimension_sections = require_u64_array4(model, key("rope.dimension_sections"));
     config.ssm_conv_kernel = require_u64(model, key("ssm.conv_kernel"));
     config.ssm_state_size = require_u64(model, key("ssm.state_size"));
     config.ssm_group_count = require_u64(model, key("ssm.group_count"));
@@ -132,11 +145,19 @@ Qwen35Config load_config(const GgufReader& model) {
     require_positive(config.ssm_time_step_rank, "ssm.time_step_rank");
     require_positive(config.ssm_inner_size, "ssm.inner_size");
     require_positive(config.full_attention_interval, "full_attention_interval");
+    std::uint64_t rope_section_count = 0;
+    for (const auto section : config.rope_dimension_sections) {
+        if (section > std::numeric_limits<std::uint64_t>::max() - rope_section_count) {
+            throw std::runtime_error("Qwen3.5 RoPE section count overflows");
+        }
+        rope_section_count += section;
+    }
     if (config.nextn_predict_layers >= config.total_block_count ||
         config.attention_heads % config.key_value_heads != 0 ||
         config.attention_head_length != config.value_head_length ||
         config.rotary_dimension > config.attention_head_length ||
         config.rotary_dimension % 2 != 0 ||
+        rope_section_count == 0 || rope_section_count > config.rotary_dimension / 2 ||
         config.ssm_inner_size % config.ssm_time_step_rank != 0 ||
         config.full_attention_interval > config.total_block_count ||
         !std::isfinite(config.rms_norm_epsilon) || config.rms_norm_epsilon <= 0.0 ||

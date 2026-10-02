@@ -87,19 +87,19 @@ void gated_delta_recurrent_step_grouped(
         for (std::size_t v = 0; v < value_dimension; ++v) {
             float memory = 0.0F;
             for (std::size_t k = 0; k < key_dimension; ++k) {
-                memory += state[state_offset + k * value_dimension + v] *
+                memory += state[state_offset + v * key_dimension + k] *
                           scratch.normalized_key[q_offset + k];
             }
             scratch.delta[delta_offset + v] = (value[delta_offset + v] - memory) * beta[head];
             output[delta_offset + v] = 0.0F;
         }
 
-        for (std::size_t k = 0; k < key_dimension; ++k) {
-            const float normalized_key = scratch.normalized_key[q_offset + k];
-            const float normalized_query = scratch.normalized_query[q_offset + k];
-            const auto row = state_offset + k * value_dimension;
-            for (std::size_t v = 0; v < value_dimension; ++v) {
-                auto& cell = state[row + v];
+        for (std::size_t v = 0; v < value_dimension; ++v) {
+            const auto row = state_offset + v * key_dimension;
+            for (std::size_t k = 0; k < key_dimension; ++k) {
+                const float normalized_key = scratch.normalized_key[q_offset + k];
+                const float normalized_query = scratch.normalized_query[q_offset + k];
+                auto& cell = state[row + k];
                 cell += normalized_key * scratch.delta[delta_offset + v];
                 output[delta_offset + v] += cell * normalized_query;
             }

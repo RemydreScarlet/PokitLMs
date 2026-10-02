@@ -13,10 +13,11 @@ struct GatedDeltaNetScratch {
 };
 
 // Advances one recurrent step. query/key are [heads, key_dimension], value and
-// output are [heads, value_dimension], and state is [heads, key_dimension,
-// value_dimension]. log_decay is the non-positive per-head log decay and beta
-// is the per-head update gate in [0, 1]. Query/key are L2-normalized with eps
-// 1e-6; query is additionally scaled by 1/sqrt(key_dimension).
+// output are [heads, value_dimension], and state is stored as
+// [heads, value_dimension, key_dimension] with the key dimension contiguous.
+// log_decay is the non-positive per-head log decay and beta is the per-head
+// update gate in [0, 1]. Query/key are L2-normalized with eps 1e-6; query is
+// additionally scaled by 1/sqrt(key_dimension).
 void gated_delta_recurrent_step(
     const float* query, const float* key, const float* value,
     const float* log_decay, const float* beta,

@@ -53,6 +53,7 @@ std::vector<float> load_matrix_values(const std::shared_ptr<storage::ModelFile>&
 }
 
 void prepare_rope(std::uint64_t position, std::size_t rotary_dimension, float theta,
+                  const std::array<std::uint64_t, 4>& sections,
                   std::span<float> cosine, std::span<float> sine) {
     if (rotary_dimension == 0 || rotary_dimension % 2 != 0 ||
         cosine.size() != rotary_dimension / 2 || sine.size() != cosine.size() ||
@@ -60,9 +61,16 @@ void prepare_rope(std::uint64_t position, std::size_t rotary_dimension, float th
         throw std::invalid_argument("invalid Qwen3.5 RoPE parameters");
     }
     const auto half = rotary_dimension / 2;
+    const auto section_count = sections[0] + sections[1] + sections[2] + sections[3];
+    if (section_count == 0 || section_count > half) {
+        throw std::invalid_argument("invalid Qwen3.5 IMRoPE sections");
+    }
     for (std::size_t pair = 0; pair < half; ++pair) {
+        const auto sector = pair % section_count;
+        const bool uses_text_position = sector % 3 == 0 && sector / 3 < sections[0];
         const float exponent = -static_cast<float>(pair) / static_cast<float>(half);
-        const float angle = static_cast<float>(position) * std::pow(theta, exponent);
+        const float angle = uses_text_position
+            ? static_cast<float>(position) * std::pow(theta, exponent) : 0.0F;
         cosine[pair] = std::cos(angle);
         sine[pair] = std::sin(angle);
     }
@@ -309,13 +317,14 @@ public:
             const auto conv_kernel = as_size(config.ssm_conv_kernel, "ssm_conv_kernel");
             const float epsilon = static_cast<float>(config.rms_norm_epsilon);
             const float theta = static_cast<float>(config.rope_frequency_base);
-            prepare_rope(position, rotary_dim, theta, scratch.rope_cosine, scratch.rope_sine);
+            prepare_rope(position, rotary_dim, theta, config.rope_dimension_sections,
+                         scratch.rope_cosine, scratch.rope_sine);
 
             for (std::size_t layer = 0; layer < layers.size(); ++layer) {
                 auto& readers = layers[layer];
                 auto& hidden = scratch.hidden;
                 auto& normalized = scratch.normalized;
-                rms_norm_zero_centered(hidden, readers.attention_norm, normalized, epsilon);
+                rms_norm(hidden, readers.attention_norm, normalized, epsilon);
                 if (readers.full_attention) {
                     const auto query_width = checked_product(attention_heads,
                                                               checked_product(head_dim, 2, "gated query head"),
@@ -335,11 +344,11 @@ public:
                     tensor_linear(*readers.value, normalized, scratch.value, 0, &scratch.linear);
                     for (std::size_t head = 0; head < attention_heads; ++head) {
                         auto row = std::span<float>(query).subspan(head * head_dim, head_dim);
-                        rms_norm_zero_centered(row, readers.query_norm, row, epsilon);
+                        rms_norm(row, readers.query_norm, row, epsilon);
                     }
                     for (std::size_t head = 0; head < kv_heads; ++head) {
                         auto row = std::span<float>(scratch.key).subspan(head * head_dim, head_dim);
-                        rms_norm_zero_centered(row, readers.key_norm, row, epsilon);
+                        rms_norm(row, readers.key_norm, row, epsilon);
                     }
                     apply_rope(query, head_dim, rotary_dim, scratch.rope_cosine, scratch.rope_sine);
                     apply_rope(scratch.key, head_dim, rotary_dim,
@@ -399,7 +408,7 @@ public:
                 }
 
                 for (std::size_t i = 0; i < hidden_size; ++i) hidden[i] += scratch.mixer_output[i];
-                rms_norm_zero_centered(hidden, readers.post_attention_norm, normalized, epsilon);
+                rms_norm(hidden, readers.post_attention_norm, normalized, epsilon);
                 tensor_linear(readers.feed_forward_gate, normalized, scratch.ffn_gate,
                               0, &scratch.linear);
                 tensor_linear(readers.feed_forward_up, normalized, scratch.ffn_up,
@@ -415,7 +424,7 @@ public:
             ++next_position;
             if (!calculate_logits) return;
             if (!logits) throw std::invalid_argument("Qwen3.5 logits output is required");
-            rms_norm_zero_centered(scratch.hidden, output_norm, scratch.final_hidden, epsilon);
+            rms_norm(scratch.hidden, output_norm, scratch.final_hidden, epsilon);
             logits->resize(as_size(index.vocabulary_size(), "vocabulary_size"));
             tensor_linear(output_reader, scratch.final_hidden, *logits, 0, &scratch.linear);
         } catch (...) {
