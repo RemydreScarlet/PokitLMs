@@ -452,6 +452,30 @@ memory. Upload and prefill varied with physical file reads and remain a
 separate cost. This policy is only enabled for resident models on discrete
 GPUs; integrated GPUs and streamed models keep their configured batch size.
 
+### Q4_K vectorized shader A/B on RTX 2070 SUPER
+
+The host benchmark now accepts `gpu_vectorized_q4=true|false` so the packed
+Q4_K/Q5_K subgroup path can be compared without changing the Android build.
+Four Qwen3.5-9B Q4_K_M runs used `hi`, an eight-token limit, subgroup mode,
+automatic whole-model caching, and 4 MiB transfer windows. All four had the
+6,169,341,984-byte model resident in Vulkan memory and produced the same token
+IDs: `248068,271,248069,271,9419,0,2500,628`.
+
+| Q4_K subgroup path | Decode tokens/s, two runs | Mean |
+| --- | ---: | ---: |
+| Vectorized | 8.12, 8.22 | 8.17 |
+| Scalar | 6.96, 6.92 | 6.94 |
+
+The vectorized path was 17.7% faster in this paired workload. Telemetry
+confirmed 2,240 vectorized Q4_K/Q5_K calls per run when enabled and zero when
+disabled. A second comparison with a 32-token cap let `hi` finish naturally:
+both paths emitted the same 14-token sequence and stopped at EOS. This checks
+output preservation for these prompts, not general model accuracy. Logs are
+retained at
+`$HOME/.local/share/pokitlms-tools/logs/qwen35-9b-q4-vectorized-{on,off}-ab{1,2}-20261003.log`
+and
+`$HOME/.local/share/pokitlms-tools/logs/qwen35-9b-q4-vectorized-{on,off}-hi32-20261003.log`.
+
 ### Numerical checks
 
 Randomized packed-kernel comparisons, multiple stream-window reuse, both

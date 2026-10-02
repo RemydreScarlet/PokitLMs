@@ -113,13 +113,14 @@ void usage(const char* executable) {
     std::cerr << "Usage: " << executable
               << " MODEL.gguf USER_MESSAGE [new_tokens=32] [kv_window=0] [kv_precision=fp16|q8] [io_threads=3]"
               << " [backend=cpu|vulkan] [gpu_tile_mib=16] [gpu_device=auto] [gpu_mode=subgroup|workgroup]"
-              << " [gpu_weight_memory=auto|local|cached] [gpu_model_cache=auto|off]\n";
+              << " [gpu_weight_memory=auto|local|cached] [gpu_model_cache=auto|off]"
+              << " [gpu_vectorized_q4=true|false]\n";
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3 || argc > 13) {
+    if (argc < 3 || argc > 14) {
         usage(argv[0]);
         return 2;
     }
@@ -156,6 +157,9 @@ int main(int argc, char** argv) {
         const std::string_view model_cache = argc > 12 ? argv[12] : "auto";
         if (model_cache != "auto" && model_cache != "off")
             throw std::invalid_argument("GPU model cache must be auto or off");
+        const std::string_view vectorized_q4 = argc > 13 ? argv[13] : "true";
+        if (vectorized_q4 != "true" && vectorized_q4 != "false")
+            throw std::invalid_argument("GPU vectorized Q4 path must be true or false");
 
         const auto load_start = std::chrono::steady_clock::now();
         pokitlms::model::Qwen35Runner runner(argv[1], kv_window, kv_precision, io_threads);
@@ -166,6 +170,7 @@ int main(int argc, char** argv) {
             options.tile_bytes = tile_mib * 1024U * 1024U;
             options.device_index = device_index;
             options.use_subgroups = mode == "subgroup";
+            options.use_vectorized_q4_k = vectorized_q4 == "true";
             if (model_cache == "off")
                 options.model_cache_mode = pokitlms::gpu::VulkanModelCacheMode::Disabled;
             if (weight_memory == "local")
@@ -178,6 +183,7 @@ int main(int argc, char** argv) {
                       << "gpu_tile_bytes=" << options.tile_bytes << '\n'
                       << "gpu_weight_memory_mode=" << weight_memory << '\n'
                       << "gpu_model_cache_mode=" << model_cache << '\n'
+                      << "gpu_vectorized_q4_k=" << (options.use_vectorized_q4_k ? "true" : "false") << '\n'
                       << "gpu_weight_memory_flags=" << vulkan->stats().weight_memory_flags << '\n';
         }
 #else
@@ -212,6 +218,7 @@ int main(int argc, char** argv) {
                 const auto gpu = vulkan->stats();
                 std::cerr << "event=gpu_totals calls=" << gpu.linear_calls
                           << " dispatches=" << gpu.dispatches
+                          << " vectorized_q4_k_calls=" << gpu.vectorized_q4_k_calls
                           << " weight_bytes=" << gpu.weight_bytes
                           << " read_ms=" << milliseconds(gpu.read_time_ns)
                           << " wait_ms=" << milliseconds(gpu.wait_time_ns)
@@ -278,6 +285,7 @@ int main(int argc, char** argv) {
 #ifdef POKITLMS_USE_VULKAN
         if (vulkan) {
             std::cerr << "gpu_model_cache_active=" << gpu_stats.model_cache_active << '\n'
+                      << "gpu_vectorized_q4_k_calls=" << gpu_stats.vectorized_q4_k_calls << '\n'
                       << "gpu_model_cache_capacity_bytes=" << gpu_stats.model_cache_capacity_bytes << '\n'
                       << "gpu_model_cache_uploaded_bytes=" << gpu_stats.model_cache_uploaded_bytes << '\n'
                       << "gpu_model_cache_upload_ms=" << milliseconds(gpu_stats.model_cache_upload_time_ns) << '\n';
