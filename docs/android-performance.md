@@ -416,6 +416,28 @@ logical model reads and 5.044 GB of physical reads during this run. This is
 one cached run, so it does not establish a paired 9B speedup. The 35B model
 was not run through generation.
 
+### Cached decode tile-size A/B on Qwen3.5-9B
+
+With whole-model caching active, changing the benchmark's `gpu_tile_mib`
+changes how many output rows each dispatch handles. All runs used the RTX
+2070 SUPER, prompt `hi`, and generated the same eight token IDs listed above.
+The 4 and 64 MiB settings were each repeated once; other sizes have one run.
+
+| Tile MiB | Decode tokens/s | Dispatches, full run | Vulkan allocation |
+| ---: | ---: | ---: | ---: |
+| 4 | 5.47, 5.61 (mean 5.54) | 20,664 | 6.179 GB |
+| 16 | 7.30 | 6,864 | 6.204 GB |
+| 48 | 7.40 | 4,104 | 6.271 GB |
+| 64 | 8.06, 7.43 (mean 7.74) | 4,072 | 6.305 GB |
+| 128 | 7.49 | 4,024 | 6.439 GB |
+
+The 64 MiB mean was about 40% faster than the 4 MiB mean for decode, while
+the 128 MiB setting added staging allocation without a measured speed gain.
+The 16 MiB default was within about 6% of the 64 MiB mean and used about
+100 MiB less Vulkan memory, so the default remains unchanged. These are host
+RTX results; they do not establish a better tile size for Mali or other phone
+GPUs. The Android 4 MiB default remains based on its earlier streaming runs.
+
 ### Numerical checks
 
 Randomized packed-kernel comparisons, multiple stream-window reuse, both
@@ -440,10 +462,11 @@ outputs rejected. It checks bounded matrix slices, not every output row or
 the complete recurrent/attention inference path. F16, BF16, Q4_0, and Q4_1
 were covered by synthetic kernel tests rather than this real 9B format set.
 
-`pokitlms-vulkan-probe MODEL.gguf [timing_tensor] [weights=device|cached]` reproduces the bounded
-slice and warm-read checks without constructing a model runner or starting
-generation. The default timing tensor is `blk.0.ffn_gate.weight`; the timing
-window is capped at 8 MiB. The benchmark reports all selected token IDs so
+`pokitlms-vulkan-probe MODEL.gguf [timing_tensor] [weights=auto|local|cached] [model_cache=off|auto|full] [gpu_device=auto|N]`
+reproduces the bounded slice and warm-read checks without constructing a model
+runner or starting generation. The default timing tensor is
+`blk.0.ffn_gate.weight`; the timing window is capped at 8 MiB unless full
+tensor probing is selected. The benchmark reports all selected token IDs so
 full-generation CPU/GPU comparisons can be made separately.
 
 After limiting mapped cache maintenance to the used byte ranges and requiring
@@ -455,9 +478,13 @@ for cached system memory (read 3.17701 ms, GPU 5.6193 ms). Both recorded zero
 physical reads. The device-memory default was retained; choosing faster CPU
 copy memory alone did not improve this probe's total time.
 
-The 35B file also passed a bounded matrix check: 514 matrices and 1,542 slices,
+The 35B file also passed bounded matrix checks: 514 matrices and 1,542 slices,
 with maximum absolute errors below `3e-6` across F32, Q8_0, Q4_K, Q5_K, Q6_K,
-and BF16. This only reads small matrix regions and does not run 35B generation.
+and BF16. A repeat on the RTX 2070 SUPER selected automatic model caching;
+the 21 GB file was not cached (`model_cache_active=0`, zero upload bytes), and
+the bounded `blk.3.attn_q.weight` timing comparison passed with maximum
+absolute error `7.15e-7`. These probes read small matrix regions and do not run
+35B generation.
 
 ## Sources for GPU work
 
