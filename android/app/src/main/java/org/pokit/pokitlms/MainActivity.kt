@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -14,8 +15,9 @@ import android.widget.TextView
 
 class MainActivity : Activity() {
     private val native = NativeModelBridge()
+    @Volatile private var useVulkanForLoad = true
     private val session = ModelSession(object : ModelSession.Backend {
-        override fun load(fd: Int) = native.load(fd, 3)
+        override fun load(fd: Int) = native.load(fd, 3, useVulkanForLoad)
         override fun generate(handle: Long, prompt: String, maxTokens: Int) = native.generate(handle, prompt, maxTokens)
         override fun close(handle: Long) = native.close(handle)
     })
@@ -25,6 +27,7 @@ class MainActivity : Activity() {
     private lateinit var output: TextView
     private lateinit var loadButton: Button
     private lateinit var sendButton: Button
+    private lateinit var gpuChoice: CheckBox
 
     companion object {
         private const val PICK_MODEL = 41
@@ -47,6 +50,10 @@ class MainActivity : Activity() {
                 startActivityForResult(intent, PICK_MODEL)
             }
         }
+        gpuChoice = CheckBox(this).apply {
+            text = "GPU（Vulkan）を使用する（モデル読み込み時に適用）"
+            isChecked = true
+        }
         prompt = EditText(this).apply { hint = "メッセージ"; minLines = 2; gravity = Gravity.TOP }
         sendButton = Button(this).apply {
             text = "送信"
@@ -57,6 +64,7 @@ class MainActivity : Activity() {
         val scroll = ScrollView(this).apply { addView(output) }
         root.addView(status)
         root.addView(loadButton)
+        root.addView(gpuChoice)
         root.addView(prompt, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         root.addView(sendButton)
         root.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -69,8 +77,10 @@ class MainActivity : Activity() {
         if (requestCode != PICK_MODEL || resultCode != RESULT_OK) return
         val uri: Uri = data?.data ?: return
         try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) { }
+        useVulkanForLoad = gpuChoice.isChecked
         loadButton.isEnabled = false
         sendButton.isEnabled = false
+        gpuChoice.isEnabled = false
         status.text = "モデルを確認中…"
         session.load(
             openSource = {
@@ -82,11 +92,13 @@ class MainActivity : Activity() {
                 status.text = "モデルを読み込みました"
                 sendButton.isEnabled = true
                 loadButton.isEnabled = true
+                gpuChoice.isEnabled = true
             } },
             onError = { e -> updateUi {
                 status.text = "読み込み失敗: ${e.message}"
                 loadButton.isEnabled = true
                 sendButton.isEnabled = modelLoaded
+                gpuChoice.isEnabled = true
             } }
         )
     }
@@ -96,17 +108,20 @@ class MainActivity : Activity() {
         if (!modelLoaded || text.isEmpty()) return
         sendButton.isEnabled = false
         loadButton.isEnabled = false
+        gpuChoice.isEnabled = false
         output.append("\n\n> $text\n\n")
         session.generate(text, 256,
             onReply = { answer -> updateUi {
                 output.append(answer)
                 sendButton.isEnabled = true
                 loadButton.isEnabled = true
+                gpuChoice.isEnabled = true
             } },
             onError = { e -> updateUi {
                 output.append("\n[エラー] ${e.message}")
                 sendButton.isEnabled = true
                 loadButton.isEnabled = true
+                gpuChoice.isEnabled = true
             } }
         )
     }

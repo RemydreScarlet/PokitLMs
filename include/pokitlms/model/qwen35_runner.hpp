@@ -15,6 +15,8 @@
 
 namespace pokitlms::model {
 
+class TensorLinearBackend;
+
 struct Qwen35GenerationStats {
     std::uint64_t prefill_time_ns{};
     std::uint64_t decode_time_ns{};
@@ -84,6 +86,8 @@ public:
                                             Qwen35GenerationStats* stats = nullptr,
                                             const Qwen35ProgressCallback& progress = {});
     void reset();
+    // The runner owns the backend; unsupported projections retain CPU math.
+    void set_linear_backend(std::shared_ptr<TensorLinearBackend> backend);
     [[nodiscard]] const Qwen35Config& config() const noexcept;
     [[nodiscard]] std::size_t kv_cache_storage_bytes() const noexcept;
     [[nodiscard]] std::size_t recurrent_state_storage_bytes() const noexcept;

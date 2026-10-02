@@ -4,7 +4,7 @@ PokitLMs is a native, mobile-first LLM inference backend and Android app in C++2
 
 ## Direction
 
-The first target is a focused CPU inference backend for memory-constrained ARM64 devices, with Mixture-of-Experts models as the primary use case. Model weights should be read from storage on demand, routed experts should use a bounded cache, and storage I/O should be measurable separately from compute. Correctness comes first: storage and cache policies must preserve the same weight bytes and model math.
+The first target is a focused inference backend for memory-constrained ARM64 devices, with CPU kernels and optional Vulkan compute shaders, and Mixture-of-Experts models as the primary use case. Model weights should be read from storage on demand, routed experts should use a bounded cache, and storage I/O should be measurable separately from compute. Correctness comes first: storage and cache policies must preserve the same weight bytes and model math.
 
 The design takes inspiration from:
 
@@ -22,6 +22,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Expert loads request best-effort OS page-cache eviction after copying into the bounded expert cache, avoiding a second cached copy of routed weights.
 - Shared random-access model file and GGUF tensor row reader; F32/F16/BF16 rows can be converted without loading a full tensor.
 - Disk-backed GGUF matrix-vector dispatch in bounded row batches for F32/F16/BF16, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, and Q8_0.
+- Optional native Vulkan matrix-vector backend for dense and MoE Qwen3.5: F32, F16, BF16, Q4_0, Q4_1, Q8_0, Q4_K, Q5_K, and Q6_K. Unsupported formats use the existing CPU kernels. Two mapped weight windows (16 MiB each by default) overlap positioned reads with GPU computation; the complete model is not uploaded. Activations and accumulation remain FP32. Reduction order can differ from CPU arithmetic, so parity is checked with numerical tolerances and generated token comparisons.
 - Automatically sizes matrix row reads around a 256 KiB temporary weight window to reduce small storage reads.
 - AArch64 NEON dot-product and weighted-accumulation paths for dense F32, quantized blocks, and grouped-query attention; scalar fallback remains portable.
 - Single-token Qwen3-MoE decode path with per-layer GQA KV state, Q/K RMSNorm, RoPE, top-k routing, and cached on-demand expert execution.
@@ -33,7 +34,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Expert tensor splitting by the GGUF last dimension, ready to feed routed slices into the bounded store.
 - Validated GGUF architecture parameters and tensor index for Qwen3-MoE (`qwen3moe`); the token executor is still awaiting comparison with a reference model.
 - Qwen3.5 GGUF tensor index and greedy text generation for dense and MoE Qwen3.5 models; prompt prefill skips vocabulary projection until its final token, recurrent convolution/DeltaNet state and bounded full-attention KV state are held and reported separately, and matrix weights stay file-backed.
-- `pokitlms-qwen35-bench MODEL.gguf USER_MESSAGE [new_tokens] [kv_window] [kv_precision] [io_threads]` reports prefill/decode throughput, attention and recurrent state memory, and (for MoE) expert-cache capacity, hit counts, and read time. Qwen3.5 MoE I/O threads can be set from 1 to 4 for device-specific comparisons; the default is 3.
+- `pokitlms-qwen35-bench MODEL.gguf USER_MESSAGE [new_tokens] [kv_window] [kv_precision] [io_threads] [backend] [gpu_tile_mib] [gpu_device] [gpu_mode]` reports prefill/decode throughput, token IDs, attention and recurrent state memory, and (for MoE) expert-cache capacity, hit counts, and read time. Vulkan runs also report weight-read, GPU, wait, and pipeline times and allocated buffer bytes. Qwen3.5 MoE I/O threads can be set from 1 to 4 for device-specific comparisons; the default is 3.
 - Tied-output Qwen3-MoE GGUF support: when `output.weight` is absent, the runner reuses `token_embd.weight` for vocabulary projection.
 - Qwen3-MoE tensor-name/shape index for the model's base, attention, router, and expert tensors.
 - Qwen GPT-2 byte-level BPE encoder/decoder using GGUF vocabulary, merge, token-type, and special-token metadata.
@@ -102,6 +103,53 @@ The C API exposes the same setting through
 `pokitlms_qwen3moe_create_ex_with_io_threads`; existing create functions keep
 the default of three workers.
 
+### Vulkan for Qwen3.5
+
+Host Vulkan builds additionally require Vulkan headers/loader, Python 3, and
+`glslc`. The Android NDK supplies `glslc` in its host `shader-tools` directory.
+Shaders are compiled and embedded at build time; the runtime has no llama.cpp
+dependency. Use a persistent disk for builds and compiler temporary files:
+
+```bash
+export TMPDIR="$HOME/.local/share/pokitlms-tools/tmp"
+mkdir -p "$TMPDIR"
+cmake -S . -B "$HOME/.local/share/pokitlms-tools/build/pokit-vulkan" \
+  -DCMAKE_BUILD_TYPE=Release -DPOKITLMS_USE_VULKAN=ON \
+  -DPOKITLMS_GLSLC="$ANDROID_NDK_ROOT/shader-tools/linux-x86_64/glslc"
+cmake --build "$HOME/.local/share/pokitlms-tools/build/pokit-vulkan" -j2
+```
+
+The generic CMake default is CPU-only. Select Vulkan explicitly in the
+Qwen3.5 benchmark:
+
+```bash
+"$HOME/.local/share/pokitlms-tools/build/pokit-vulkan/pokitlms-qwen35-bench" \
+  MODEL.gguf "hi" 8 0 fp16 3 vulkan 16 auto subgroup
+```
+
+The final options select `cpu|vulkan` (default `cpu`), weight-window MiB
+(default `16`, range `1`–`128` per window), Vulkan device index or `auto`, and
+`subgroup|workgroup` (default `subgroup`). Auto selection prefers a discrete
+GPU, then an integrated GPU. Subgroup acceleration is used when supported;
+the workgroup reduction provides an alternative for comparisons. An
+explicit Vulkan request fails if initialization fails; unsupported weight
+formats still use CPU dispatch.
+
+For C++ integration, create a `pokitlms::gpu::VulkanLinearBackend` and pass
+its `shared_ptr` to `Qwen35Runner::set_linear_backend`. The runner owns the
+backend for subsequent linear operations. Qwen3-MoE remains on the CPU.
+
+`pokitlms-vulkan-probe MODEL.gguf [timing_tensor] [weights=device|cached]` checks small slices from
+real matrix tensors and compares repeated reads of a warmed window, bounded
+to 8 MiB. Its default timing tensor is `blk.0.ffn_gate.weight`. It reports
+Linux physical-read counters separately from logical bytes and never starts
+model generation.
+
+The initial 9B GPU run produced the same eight greedy tokens as the matching
+host CPU run and completed on Pixel 9a's Mali-G715. Performance remains
+limited by weight delivery, and a completed phone CPU comparison is still
+missing. See [measurements and limitations](docs/android-performance.md).
+
 ## Android app
 
 Build from the repository root with Gradle 8.7, JDK 17, Android SDK platform
@@ -137,9 +185,20 @@ gradle -p android -Ppokitlms.testBuildType=benchmark connectedBenchmarkAndroidTe
 
 Its native code is compiled with `-O2`; the ordinary Debug variant has no native
 optimization and must not be used to report inference speed. The full-model
-check also accepts `pokitlms.maxTokens` and `pokitlms.ioThreads`. The `PokitLMsAB`
+check also accepts `pokitlms.maxTokens`, `pokitlms.ioThreads`,
+`pokitlms.backend=cpu|vulkan`, `pokitlms.gpuTileMiB`,
+`pokitlms.gpuMode=subgroup|workgroup`, and `pokitlms.prompt`. The `PokitLMsAB`
 logcat tag records each prompt/decoded token, wall time, process CPU time,
-RSS/swap, system available memory, and the prefill/decode summary.
+RSS/swap, system available memory, and the prefill/decode summary. Vulkan
+events also identify the GPU and report cumulative transfer/compute counters.
+The benchmark variant includes optional kernel diagnostics selected with
+`pokitlms.checkVulkan=true`; ordinary app builds omit these checks.
+
+Android builds include Vulkan support. The GPU checkbox selects Vulkan for
+Qwen3.5 when loading a model. At the JNI boundary, Vulkan is opt-in through
+`NativeModelBridge.load(fd, ioThreads, useVulkan = true, gpuTileMiB = 16,
+gpuSubgroups = true)`; its API default is CPU. Backend changes apply at model
+load. Vulkan initialization failures are reported to the caller.
 
 The app opens GGUF files through Android's system file picker and keeps the
 selected descriptor open while the native runner reads weights from it, so it
@@ -153,4 +212,4 @@ remain future work.
 2. Add multi-turn model-specific prompt templates.
 3. Expand tensor-format coverage for common GGUF quantizations.
 4. Measure and tune the asynchronous storage lanes and cache policy on target ARM64 devices.
-5. Measure on target ARM64 devices before choosing cache defaults or adding platform-specific acceleration.
+5. Compare Vulkan window sizes, weight-delivery policies, and shader reductions on target ARM64 devices while extending real-model parity checks.

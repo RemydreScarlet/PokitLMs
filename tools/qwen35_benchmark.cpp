@@ -1,12 +1,24 @@
 #include "pokitlms/model/qwen35_runner.hpp"
+#ifdef POKITLMS_USE_VULKAN
+#include "pokitlms/gpu/vulkan_linear.hpp"
+#endif
 
 #include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <vector>
+
+#if defined(__linux__)
+#include <fstream>
+#include <optional>
+#include <sys/resource.h>
+#endif
 
 namespace {
 
@@ -31,15 +43,82 @@ double tokens_per_second(std::size_t tokens, std::uint64_t nanoseconds) {
            static_cast<double>(nanoseconds);
 }
 
+#if defined(__linux__)
+struct ProcessTelemetry {
+    std::optional<std::uint64_t> rchar;
+    std::optional<std::uint64_t> read_bytes;
+    std::optional<std::uint64_t> rss_kb;
+    std::optional<std::uint64_t> swap_kb;
+    std::optional<std::uint64_t> mem_available_kb;
+    std::optional<double> cpu_user_ms;
+    std::optional<double> cpu_sys_ms;
+};
+
+template <typename Visitor>
+void read_proc_values(const char* path, Visitor&& visitor) {
+    std::ifstream input(path);
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        const std::string_view view(line);
+        auto value_text = view.substr(colon + 1);
+        const auto first = value_text.find_first_not_of(" \t");
+        if (first == std::string_view::npos) continue;
+        value_text.remove_prefix(first);
+        std::uint64_t value{};
+        const auto [end, error] = std::from_chars(
+            value_text.data(), value_text.data() + value_text.size(), value);
+        if (error == std::errc{} && end != value_text.data()) {
+            visitor(view.substr(0, colon + 1), value);
+        }
+    }
+}
+
+ProcessTelemetry process_telemetry() {
+    ProcessTelemetry result;
+    read_proc_values("/proc/self/io", [&](std::string_view key, std::uint64_t value) {
+        if (key == "rchar:") result.rchar = value;
+        else if (key == "read_bytes:") result.read_bytes = value;
+    });
+    read_proc_values("/proc/self/status", [&](std::string_view key, std::uint64_t value) {
+        if (key == "VmRSS:") result.rss_kb = value;
+        else if (key == "VmSwap:") result.swap_kb = value;
+    });
+    read_proc_values("/proc/meminfo", [&](std::string_view key, std::uint64_t value) {
+        if (key == "MemAvailable:") result.mem_available_kb = value;
+    });
+    rusage usage{};
+    if (::getrusage(RUSAGE_SELF, &usage) == 0) {
+        result.cpu_user_ms = static_cast<double>(usage.ru_utime.tv_sec) * 1000.0 +
+                             static_cast<double>(usage.ru_utime.tv_usec) / 1000.0;
+        result.cpu_sys_ms = static_cast<double>(usage.ru_stime.tv_sec) * 1000.0 +
+                            static_cast<double>(usage.ru_stime.tv_usec) / 1000.0;
+    }
+    return result;
+}
+
+void log_process_telemetry(const ProcessTelemetry& snapshot) {
+    if (snapshot.rchar) std::cerr << " rchar=" << *snapshot.rchar;
+    if (snapshot.read_bytes) std::cerr << " read_bytes=" << *snapshot.read_bytes;
+    if (snapshot.rss_kb) std::cerr << " rss_kb=" << *snapshot.rss_kb;
+    if (snapshot.swap_kb) std::cerr << " swap_kb=" << *snapshot.swap_kb;
+    if (snapshot.mem_available_kb) std::cerr << " mem_available_kb=" << *snapshot.mem_available_kb;
+    if (snapshot.cpu_user_ms) std::cerr << " cpu_user_ms=" << *snapshot.cpu_user_ms;
+    if (snapshot.cpu_sys_ms) std::cerr << " cpu_sys_ms=" << *snapshot.cpu_sys_ms;
+}
+#endif
+
 void usage(const char* executable) {
     std::cerr << "Usage: " << executable
-              << " MODEL.gguf USER_MESSAGE [new_tokens=32] [kv_window=0] [kv_precision=fp16|q8] [io_threads=3]\n";
+              << " MODEL.gguf USER_MESSAGE [new_tokens=32] [kv_window=0] [kv_precision=fp16|q8] [io_threads=3]"
+              << " [backend=cpu|vulkan] [gpu_tile_mib=16] [gpu_device=auto] [gpu_mode=subgroup|workgroup]\n";
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3 || argc > 7) {
+    if (argc < 3 || argc > 11) {
         usage(argv[0]);
         return 2;
     }
@@ -53,15 +132,88 @@ int main(int argc, char** argv) {
             else if (precision != "fp16") throw std::invalid_argument("KV precision must be fp16 or q8");
         }
         const auto io_threads = argc > 6 ? parse_size(argv[6], "expert I/O thread count") : 3;
+        const std::string_view backend = argc > 7 ? argv[7] : "cpu";
+        if (backend != "cpu" && backend != "vulkan")
+            throw std::invalid_argument("backend must be cpu or vulkan");
+        const auto tile_mib = argc > 8 ? parse_size(argv[8], "GPU tile MiB") : 16;
+        if (tile_mib < 1 || tile_mib > 128)
+            throw std::invalid_argument("GPU tile MiB must be between 1 and 128");
+        const std::string_view device = argc > 9 ? argv[9] : "auto";
+        auto device_index = std::numeric_limits<std::uint32_t>::max();
+        if (device != "auto") {
+            const auto index = parse_size(argv[9], "GPU device index");
+            if (index >= std::numeric_limits<std::uint32_t>::max())
+                throw std::invalid_argument("GPU device index is too large");
+            device_index = static_cast<std::uint32_t>(index);
+        }
+        const std::string_view mode = argc > 10 ? argv[10] : "subgroup";
+        if (mode != "subgroup" && mode != "workgroup")
+            throw std::invalid_argument("GPU mode must be subgroup or workgroup");
 
         const auto load_start = std::chrono::steady_clock::now();
         pokitlms::model::Qwen35Runner runner(argv[1], kv_window, kv_precision, io_threads);
+#ifdef POKITLMS_USE_VULKAN
+        std::shared_ptr<pokitlms::gpu::VulkanLinearBackend> vulkan;
+        if (backend == "vulkan") {
+            pokitlms::gpu::VulkanLinearOptions options;
+            options.tile_bytes = tile_mib * 1024U * 1024U;
+            options.device_index = device_index;
+            options.use_subgroups = mode == "subgroup";
+            vulkan = std::make_shared<pokitlms::gpu::VulkanLinearBackend>(options);
+            runner.set_linear_backend(vulkan);
+            std::cerr << "gpu_device=" << vulkan->device_name() << '\n'
+                      << "gpu_tile_bytes=" << options.tile_bytes << '\n'
+                      << "gpu_weight_memory_flags=" << vulkan->stats().weight_memory_flags << '\n';
+        }
+#else
+        (void)device_index;
+        if (backend == "vulkan")
+            throw std::runtime_error("Vulkan support was not compiled into this build");
+#endif
+        std::cerr << "backend=" << backend << '\n';
         const auto load_ns = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - load_start).count());
         pokitlms::model::Qwen35GenerationStats stats;
         const auto bytes_before = runner.bytes_read_from_disk();
-        const auto response = runner.generate_chat(argv[2], max_new_tokens, &stats);
+        std::vector<std::uint32_t> token_ids;
+        const auto progress = [&](const pokitlms::model::Qwen35ProgressEvent& event) {
+            using Phase = pokitlms::model::Qwen35ProgressEvent::Phase;
+            const char* phase = "decode_forward";
+            if (event.phase == Phase::PrefillToken) phase = "prefill_token";
+            if (event.phase == Phase::GeneratedToken) {
+                phase = "generated_token";
+                token_ids.push_back(event.token_id);
+            }
+            std::cerr << "event=step phase=" << phase << " index=" << event.index
+                      << " token_id=" << event.token_id
+                      << " step_ms=" << milliseconds(event.elapsed_ns);
+#if defined(__linux__)
+            log_process_telemetry(process_telemetry());
+#endif
+            std::cerr << '\n';
+#ifdef POKITLMS_USE_VULKAN
+            if (vulkan && event.phase != Phase::GeneratedToken) {
+                const auto gpu = vulkan->stats();
+                std::cerr << "event=gpu_totals calls=" << gpu.linear_calls
+                          << " dispatches=" << gpu.dispatches
+                          << " weight_bytes=" << gpu.weight_bytes
+                          << " read_ms=" << milliseconds(gpu.read_time_ns)
+                          << " wait_ms=" << milliseconds(gpu.wait_time_ns)
+                          << " gpu_ms=" << milliseconds(gpu.gpu_time_ns)
+                          << " pipeline_ms=" << milliseconds(gpu.pipeline_time_ns)
+                          << " cache_ms=" << milliseconds(gpu.cache_time_ns)
+                          << " allocated_bytes=" << gpu.allocated_bytes << '\n';
+            }
+#endif
+        };
+#if defined(__linux__)
+        const auto telemetry_before = process_telemetry();
+#endif
+        const auto response = runner.generate_chat(argv[2], max_new_tokens, &stats, progress);
+#if defined(__linux__)
+        const auto telemetry_after = process_telemetry();
+#endif
         const auto expert_cache = runner.expert_cache_stats();
         std::cout << response << '\n';
         std::cerr << "model_load_ms=" << milliseconds(load_ns) << '\n'
@@ -87,6 +239,26 @@ int main(int argc, char** argv) {
                   << "expert_read_ms=" << milliseconds(expert_cache.read_time_ns) << '\n'
                   << "expert_cache_hits=" << expert_cache.hits << '\n'
                   << "expert_cache_misses=" << expert_cache.misses << '\n';
+#if defined(__linux__)
+        // Process storage I/O is distinct from requested model bytes: cache hits
+        // increase rchar without requiring a physical storage read.
+        if (telemetry_before.read_bytes && telemetry_after.read_bytes &&
+            *telemetry_after.read_bytes >= *telemetry_before.read_bytes) {
+            std::cerr << "process_physical_read_bytes="
+                      << *telemetry_after.read_bytes - *telemetry_before.read_bytes << '\n';
+        }
+        if (telemetry_before.rchar && telemetry_after.rchar &&
+            *telemetry_after.rchar >= *telemetry_before.rchar) {
+            std::cerr << "process_rchar_bytes="
+                      << *telemetry_after.rchar - *telemetry_before.rchar << '\n';
+        }
+#endif
+        std::cerr << "generated_token_ids=";
+        for (std::size_t i = 0; i < token_ids.size(); ++i) {
+            if (i) std::cerr << ',';
+            std::cerr << token_ids[i];
+        }
+        std::cerr << '\n';
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "qwen35-bench: " << error.what() << '\n';

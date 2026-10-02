@@ -23,7 +23,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild {
-            cmake { arguments += listOf("-DPOKITLMS_BUILD_TESTS=OFF", "-DPOKITLMS_BUILD_BENCHMARK=OFF", "-DPOKITLMS_BUILD_ANDROID_APP=ON") }
+            cmake { arguments += listOf("-DPOKITLMS_BUILD_TESTS=OFF", "-DPOKITLMS_BUILD_BENCHMARK=OFF", "-DPOKITLMS_BUILD_ANDROID_APP=ON", "-DPOKITLMS_USE_VULKAN=ON") }
         }
     }
     externalNativeBuild {
@@ -36,7 +36,10 @@ android {
             signingConfig = signingConfigs.getByName("debug")
             matchingFallbacks += listOf("release")
             externalNativeBuild {
-                cmake { cppFlags += listOf("-O2") }
+                cmake {
+                    cppFlags += listOf("-O2")
+                    arguments += listOf("-DPOKITLMS_GPU_DIAGNOSTICS=ON")
+                }
             }
         }
     }

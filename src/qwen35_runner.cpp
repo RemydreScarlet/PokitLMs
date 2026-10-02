@@ -530,6 +530,7 @@ public:
     std::size_t model_context{};
     std::size_t context_capacity{};
     std::uint64_t next_position{};
+    std::shared_ptr<TensorLinearBackend> linear_backend;
     ForwardScratch scratch;
 
     void forward_into(std::uint32_t token_id, std::uint64_t position,
@@ -935,6 +936,11 @@ std::string Qwen35Runner::generate_chat(std::string_view user_message,
 }
 
 void Qwen35Runner::reset() { if (impl_) impl_->reset(); }
+void Qwen35Runner::set_linear_backend(std::shared_ptr<TensorLinearBackend> backend) {
+    if (!impl_) throw std::logic_error("Qwen3.5 runner has been moved from");
+    impl_->linear_backend = std::move(backend);
+    impl_->scratch.linear.backend = impl_->linear_backend.get();
+}
 const Qwen35Config& Qwen35Runner::config() const noexcept {
     static const Qwen35Config empty{};
     return impl_ ? impl_->index.config() : empty;

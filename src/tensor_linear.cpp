@@ -210,6 +210,8 @@ void tensor_linear(const TensorReader& weights, std::span<const float> input,
         throw std::invalid_argument("unsupported GGUF matrix type for tensor_linear");
     }
 
+    if (scratch && scratch->backend && scratch->backend->try_linear(weights, input, output)) return;
+
     if (output.size() >= 256) {
         row_executor().parallel_for(output.size(), 128,
             [&weights, input, output, row_batch, floating](std::size_t first, std::size_t rows) {

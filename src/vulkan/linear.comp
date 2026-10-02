@@ -1,0 +1,146 @@
+#version 450
+
+// Packed GGUF weights, FP32 activations and accumulation. No activation
+// requantization or expert substitution. A subgroup computes one output row.
+#ifdef USE_SUBGROUP
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#endif
+
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const uint weight_type = 12;
+layout(set = 0, binding = 0, std430) readonly buffer Weights { uint w[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Parameters {
+    uint columns;
+    uint rows;
+    uint row_bytes;
+    uint output_first;
+} p;
+
+uint byte_at(uint offset) {
+    return (w[offset / 4] >> ((offset % 4) * 8)) & 255;
+}
+uint u16_at(uint offset) { return byte_at(offset) | (byte_at(offset + 1) << 8); }
+int signed_byte(uint value) { return value < 128 ? int(value) : int(value) - 256; }
+float half_at(uint offset) { return unpackHalf2x16(u16_at(offset)).x; }
+
+uvec2 scale_min(uint base, uint group) {
+    if (group < 4) return uvec2(byte_at(base + group) & 63,
+                               byte_at(base + group + 4) & 63);
+    return uvec2((byte_at(base + group + 4) & 15) |
+                     ((byte_at(base + group - 4) >> 6) << 4),
+                 (byte_at(base + group + 4) >> 4) |
+                     ((byte_at(base + group) >> 6) << 4));
+}
+
+float dot_q45_k(uint base, uint lane, uint stride) {
+    precise float sum = 0.0;
+    bool q5 = weight_type == 13;
+    for (uint b = 0; b < p.columns / 256; ++b) {
+        uint block = base + b * (q5 ? 176 : 144);
+        float d = half_at(block), dm = half_at(block + 2);
+        for (uint chunk = 0; chunk < 4; ++chunk) {
+            uvec2 s0 = scale_min(block + 4, chunk * 2);
+            uvec2 s1 = scale_min(block + 4, chunk * 2 + 1);
+            for (uint i = lane; i < 32; i += stride) {
+                uint packed = byte_at(block + (q5 ? 48 : 16) + chunk * 32 + i);
+                uint lo = packed & 15, hi = packed >> 4;
+                if (q5) {
+                    uint high = byte_at(block + 16 + i);
+                    lo |= ((high >> (chunk * 2)) & 1) << 4;
+                    hi |= ((high >> (chunk * 2 + 1)) & 1) << 4;
+                }
+                precise float a = d * float(s0.x) * float(lo) - dm * float(s0.y);
+                precise float c = d * float(s1.x) * float(hi) - dm * float(s1.y);
+                sum += a * x[b * 256 + chunk * 64 + i];
+                sum += c * x[b * 256 + chunk * 64 + i + 32];
+            }
+        }
+    }
+    return sum;
+}
+
+float dot_q6_k(uint base, uint lane, uint stride) {
+    precise float sum = 0.0;
+    for (uint b = 0; b < p.columns / 256; ++b) {
+        uint block = base + b * 210;
+        float d = half_at(block + 208);
+        for (uint segment = 0; segment < 2; ++segment) {
+            for (uint i = lane; i < 32; i += stride) {
+                uint lo0 = byte_at(block + segment * 64 + i);
+                uint lo1 = byte_at(block + segment * 64 + i + 32);
+                uint hi = byte_at(block + 128 + segment * 32 + i);
+                uint sc = block + 192 + segment * 8 + i / 16;
+                int q0 = int((lo0 & 15) | ((hi & 3) << 4)) - 32;
+                int q1 = int((lo1 & 15) | (((hi >> 2) & 3) << 4)) - 32;
+                int q2 = int((lo0 >> 4) | (((hi >> 4) & 3) << 4)) - 32;
+                int q3 = int((lo1 >> 4) | (((hi >> 6) & 3) << 4)) - 32;
+                precise float a = d * float(signed_byte(byte_at(sc))) * float(q0);
+                precise float c = d * float(signed_byte(byte_at(sc + 2))) * float(q1);
+                precise float e = d * float(signed_byte(byte_at(sc + 4))) * float(q2);
+                precise float f = d * float(signed_byte(byte_at(sc + 6))) * float(q3);
+                uint col = b * 256 + segment * 128 + i;
+                sum += a * x[col];
+                sum += c * x[col + 32];
+                sum += e * x[col + 64];
+                sum += f * x[col + 96];
+            }
+        }
+    }
+    return sum;
+}
+
+float element(uint base, uint col) {
+    if (weight_type == 0) return uintBitsToFloat(w[(base + col * 4) / 4]);
+    if (weight_type == 1) return half_at(base + col * 2);
+    if (weight_type == 30) return uintBitsToFloat(u16_at(base + col * 2) << 16);
+    uint b = col / 32, i = col % 32;
+    if (weight_type == 8) {
+        uint block = base + b * 34;
+        return half_at(block) * float(signed_byte(byte_at(block + 2 + i)));
+    }
+    bool q41 = weight_type == 3;
+    uint block = base + b * (q41 ? 20 : 18);
+    uint packed = byte_at(block + (q41 ? 4 : 2) + i % 16);
+    uint quant = i < 16 ? packed & 15 : packed >> 4;
+    if (q41) return half_at(block) * float(quant) + half_at(block + 2);
+    return half_at(block) * float(int(quant) - 8);
+}
+
+#ifndef USE_SUBGROUP
+shared float partial[128];
+#endif
+
+void main() {
+#ifdef USE_SUBGROUP
+    uint lane = gl_SubgroupInvocationID, stride = gl_SubgroupSize;
+    uint row = gl_WorkGroupID.x * (128 / gl_SubgroupSize) + gl_SubgroupID;
+    if (row >= p.rows) return;
+#else
+    uint lane = gl_LocalInvocationID.x, stride = 128;
+    uint row = gl_WorkGroupID.x;
+#endif
+    uint base = row * p.row_bytes;
+    precise float sum = 0.0;
+    if (weight_type == 12 || weight_type == 13) sum = dot_q45_k(base, lane, stride);
+    else if (weight_type == 14) sum = dot_q6_k(base, lane, stride);
+    else {
+        for (uint col = lane; col < p.columns; col += stride) {
+            sum += element(base, col) * x[col];
+        }
+    }
+#ifdef USE_SUBGROUP
+    float result = subgroupAdd(sum);
+    if (subgroupElect()) y[p.output_first + row] = result;
+#else
+    partial[lane] = sum;
+    barrier();
+    for (uint n = 64; n > 0; n /= 2) {
+        if (lane < n) partial[lane] += partial[lane + n];
+        barrier();
+    }
+    if (lane == 0) y[p.output_first + row] = partial[0];
+#endif
+}

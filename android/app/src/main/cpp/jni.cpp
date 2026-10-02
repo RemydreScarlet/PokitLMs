@@ -4,6 +4,12 @@
 #include "pokitlms/model/gguf_reader.hpp"
 #include "pokitlms/model/qwen3_moe_runner.hpp"
 #include "pokitlms/model/qwen35_runner.hpp"
+#ifdef POKITLMS_USE_VULKAN
+#include "pokitlms/gpu/vulkan_linear.hpp"
+#endif
+#ifdef POKITLMS_GPU_DIAGNOSTICS
+#include "vulkan_linear_cases.hpp"
+#endif
 
 #include <memory>
 #include <fstream>
@@ -16,7 +22,8 @@
 
 namespace {
 struct Engine {
-    Engine(const std::string& path, std::size_t expert_io_threads) {
+    Engine(const std::string& path, std::size_t expert_io_threads, bool use_vulkan,
+           [[maybe_unused]] std::size_t gpu_tile_mib, [[maybe_unused]] bool gpu_subgroups) {
         pokitlms::model::GgufReader gguf(path);
         const auto it = gguf.metadata().find("general.architecture");
         if (it == gguf.metadata().end() || !std::holds_alternative<std::string>(it->second.value))
@@ -30,9 +37,28 @@ struct Engine {
             dense = std::make_unique<pokitlms::model::Qwen35Runner>(
                 path, 0, pokitlms::KvCachePrecision::Float16, expert_io_threads);
         else throw std::runtime_error("Unsupported GGUF architecture: " + architecture);
+        if (use_vulkan && dense) {
+#ifdef POKITLMS_USE_VULKAN
+            pokitlms::gpu::VulkanLinearOptions options;
+            options.tile_bytes = gpu_tile_mib * 1024U * 1024U;
+            options.use_subgroups = gpu_subgroups;
+            vulkan = std::make_shared<pokitlms::gpu::VulkanLinearBackend>(options);
+            dense->set_linear_backend(vulkan);
+            __android_log_print(ANDROID_LOG_INFO, "PokitLMsAB",
+                "event=backend_init backend=vulkan device=%s tile_bytes=%zu weight_memory_flags=%u",
+                vulkan->device_name().c_str(), options.tile_bytes, vulkan->stats().weight_memory_flags);
+#else
+            throw std::runtime_error("Vulkan support was not compiled into this build");
+#endif
+        } else {
+            __android_log_print(ANDROID_LOG_INFO, "PokitLMsAB", "event=backend_init backend=cpu");
+        }
     }
     std::unique_ptr<pokitlms::model::Qwen3MoeRunner> moe;
     std::unique_ptr<pokitlms::model::Qwen35Runner> dense;
+#ifdef POKITLMS_USE_VULKAN
+    std::shared_ptr<pokitlms::gpu::VulkanLinearBackend> vulkan;
+#endif
 };
 
 jstring java_string(JNIEnv* env, const std::string& value) {
@@ -107,8 +133,7 @@ std::uint64_t proc_kb_value(const char* path, const char* field) {
         std::istringstream parsed(line);
         std::string name;
         std::uint64_t value = 0;
-        std::string unit;
-        if (parsed >> name >> value >> unit && name == field) return value;
+        if (parsed >> name >> value && name == field) return value;
     }
     return 0;
 }
@@ -131,13 +156,17 @@ const char* progress_phase(pokitlms::model::Qwen35ProgressEvent::Phase phase) {
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_org_pokit_pokitlms_NativeModelBridge_load(JNIEnv* env, jobject, jint fd,
-                                               jint expert_io_threads) {
+                                               jint expert_io_threads, jboolean use_vulkan,
+                                               jint gpu_tile_mib, jboolean gpu_subgroups) {
     try {
         if (expert_io_threads < 1 || expert_io_threads > 4)
             throw std::invalid_argument("expert I/O threads must be between 1 and 4");
+        if (gpu_tile_mib < 1 || gpu_tile_mib > 128)
+            throw std::invalid_argument("GPU tile MiB must be between 1 and 128");
         const std::string path = "/proc/self/fd/" + std::to_string(fd);
         return reinterpret_cast<jlong>(new Engine(path,
-            static_cast<std::size_t>(expert_io_threads)));
+            static_cast<std::size_t>(expert_io_threads), use_vulkan == JNI_TRUE,
+            static_cast<std::size_t>(gpu_tile_mib), gpu_subgroups == JNI_TRUE));
     } catch (const std::exception& e) {
         throw_java(env, "java/lang/IllegalArgumentException", e.what());
         return 0;
@@ -158,7 +187,7 @@ Java_org_pokit_pokitlms_NativeModelBridge_generate(JNIEnv* env, jobject, jlong h
 
         pokitlms::model::Qwen35GenerationStats stats;
         const pokitlms::model::Qwen35ProgressCallback progress =
-            [](const pokitlms::model::Qwen35ProgressEvent& event) {
+            [engine](const pokitlms::model::Qwen35ProgressEvent& event) {
                 rusage usage{};
                 getrusage(RUSAGE_SELF, &usage);
                 const auto rss_kb = proc_kb_value("/proc/self/status", "VmRSS:");
@@ -166,10 +195,12 @@ Java_org_pokit_pokitlms_NativeModelBridge_generate(JNIEnv* env, jobject, jlong h
                 const auto vm_kb = proc_kb_value("/proc/self/status", "VmSize:");
                 const auto available_kb = proc_kb_value("/proc/meminfo", "MemAvailable:");
                 const auto swap_free_kb = proc_kb_value("/proc/meminfo", "SwapFree:");
+                const auto read_bytes = proc_kb_value("/proc/self/io", "read_bytes:");
+                const auto rchar = proc_kb_value("/proc/self/io", "rchar:");
                 __android_log_print(ANDROID_LOG_INFO, "PokitLMsAB",
                     "event=step phase=%s index=%zu token_id=%u step_ms=%.3f "
                     "cpu_user_ms=%.3f cpu_sys_ms=%.3f rss_kb=%llu swap_kb=%llu "
-                    "vm_kb=%llu mem_available_kb=%llu swap_free_kb=%llu",
+                    "vm_kb=%llu mem_available_kb=%llu swap_free_kb=%llu read_bytes=%llu rchar=%llu",
                     progress_phase(event.phase), event.index, event.token_id,
                     static_cast<double>(event.elapsed_ns) / 1'000'000.0,
                     timeval_ms(usage.ru_utime), timeval_ms(usage.ru_stime),
@@ -177,7 +208,26 @@ Java_org_pokit_pokitlms_NativeModelBridge_generate(JNIEnv* env, jobject, jlong h
                     static_cast<unsigned long long>(swap_kb),
                     static_cast<unsigned long long>(vm_kb),
                     static_cast<unsigned long long>(available_kb),
-                    static_cast<unsigned long long>(swap_free_kb));
+                    static_cast<unsigned long long>(swap_free_kb),
+                    static_cast<unsigned long long>(read_bytes),
+                    static_cast<unsigned long long>(rchar));
+#ifdef POKITLMS_USE_VULKAN
+                if (engine->vulkan && event.phase != pokitlms::model::Qwen35ProgressEvent::Phase::GeneratedToken) {
+                    const auto gpu = engine->vulkan->stats();
+                    __android_log_print(ANDROID_LOG_INFO, "PokitLMsAB",
+                        "event=gpu_totals calls=%llu dispatches=%llu weight_bytes=%llu "
+                        "read_ms=%.3f wait_ms=%.3f gpu_ms=%.3f pipeline_ms=%.3f cache_ms=%.3f allocated_bytes=%llu",
+                        static_cast<unsigned long long>(gpu.linear_calls),
+                        static_cast<unsigned long long>(gpu.dispatches),
+                        static_cast<unsigned long long>(gpu.weight_bytes),
+                        static_cast<double>(gpu.read_time_ns) / 1'000'000.0,
+                        static_cast<double>(gpu.wait_time_ns) / 1'000'000.0,
+                        static_cast<double>(gpu.gpu_time_ns) / 1'000'000.0,
+                        static_cast<double>(gpu.pipeline_time_ns) / 1'000'000.0,
+                        static_cast<double>(gpu.cache_time_ns) / 1'000'000.0,
+                        static_cast<unsigned long long>(gpu.allocated_bytes));
+                }
+#endif
             };
         __android_log_print(ANDROID_LOG_INFO, "PokitLMsAB",
                             "event=generate_start arch=qwen35 max_tokens=%d prompt_chars=%zu",
@@ -201,4 +251,18 @@ Java_org_pokit_pokitlms_NativeModelBridge_generate(JNIEnv* env, jobject, jlong h
 extern "C" JNIEXPORT void JNICALL
 Java_org_pokit_pokitlms_NativeModelBridge_close(JNIEnv*, jobject, jlong handle) {
     delete reinterpret_cast<Engine*>(handle);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_pokit_pokitlms_NativeModelBridge_verifyVulkan(JNIEnv* env, jobject) {
+    try {
+#ifdef POKITLMS_GPU_DIAGNOSTICS
+        return java_string(env, run_vulkan_linear_checks());
+#else
+        throw std::runtime_error("GPU diagnostics require the benchmark build");
+#endif
+    } catch (const std::exception& error) {
+        throw_java(env, "java/lang/RuntimeException", error.what());
+        return nullptr;
+    }
 }
