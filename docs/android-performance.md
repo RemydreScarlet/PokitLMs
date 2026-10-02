@@ -512,6 +512,17 @@ the original FP32 activations for general inputs. The candidate was removed.
 Its captured output remains at
 `$HOME/.local/share/pokitlms-tools/logs/qwen35-9b-intdot-on-hi32-20261003.log`.
 
+Removing GLSL `precise` qualifiers from the existing FP32 accumulation also
+failed to improve the vectorized Q4_K path. Its Vulkan matrix and tiny-model
+checks passed; Q6_K maximum absolute error was 3.66e-4. A full RTX 2070 SUPER
+Qwen3.5-9B `hi` run returned the same 14 token IDs as the current path, but
+measured 7.28 tokens/s against 8.07 tokens/s for the current vectorized path
+with the same 4 MiB windows and whole-model cache. This was one candidate run,
+so it is evidence against keeping the change, not a precise performance
+estimate. The experimental shader stayed in an isolated worktree and was not
+copied into the product source. Its run is retained at
+`$HOME/.local/share/pokitlms-tools/logs/qwen35-9b-fastaccum-vectorized-hi32-20261003.log`.
+
 ### Numerical checks
 
 Randomized packed-kernel comparisons, multiple stream-window reuse, both
