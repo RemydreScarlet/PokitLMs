@@ -37,7 +37,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Qwen GPT-2 byte-level BPE encoder/decoder using GGUF vocabulary, merge, token-type, and special-token metadata.
 - Streaming MoE routing callback that selects only the top-k expert IDs with O(top-k) routing memory.
 - Fixed-capacity ring-buffer KV cache and numerically stable grouped-query causal attention primitive.
-- FP32 one-token Gated DeltaNet recurrent-step primitive with reusable scratch and separate key/value head counts, matching Qwen3.5's grouped key heads; stateful depthwise causal convolution, gated RMSNorm, and zero-centered RMSNorm are available, while the Qwen3.5 model runner is not implemented yet.
+- FP32 one-token Gated DeltaNet recurrent-step primitive with reusable scratch and separate key/value head counts, matching Qwen3.5's grouped key heads; stateful depthwise causal convolution, gated RMSNorm, and zero-centered RMSNorm are used by the Qwen3.5 runner.
 - FP16 KV residency option; Qwen3-MoE runner uses it by default to halve cache storage while accumulating attention in FP32.
 - Optional blockwise Q8_0 KV storage with FP32 attention accumulation for smaller mobile KV footprints; FP16 remains the default. KV resident bytes are exposed to C++/C and printed by the benchmark CLI.
 - Bounded sliding KV window: older positions roll out while RoPE positions continue up to the model's advertised context length.
@@ -48,7 +48,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - C ABI opaque Qwen3-MoE handle for creation, serialized text generation, and cache/storage telemetry.
 - Qwen3 chat helpers for single messages and multi-turn system/user/assistant history in the C++ and C APIs.
 - Multi-turn chat keeps KV state and reuses token-identical history prefixes; generated assistant token IDs are retained so replies are not re-tokenized between turns.
-- Multi-turn chat-template handling, broader quantized format coverage, and optimized ARM kernels are still incomplete. The decode path is compile-verified but has not been compared against a reference model output.
+- Both model runners have deterministic tiny-GGUF generation smoke tests; the Qwen3.5 fixture includes recurrent and full-attention layers. Full-model logits and generated text have not yet been compared against a reference implementation; broader quantized format coverage and optimized ARM kernels also remain incomplete.
 
 ## Build
 
@@ -58,6 +58,14 @@ Requirements: CMake 3.22+ and a C++20 compiler.
 cmake -S . -B build -DPOKITLMS_BUILD_TESTS=ON
 cmake --build build -j
 ctest --test-dir build --output-on-failure
+```
+
+The tiny GGUF files used for the host and Android generation smoke tests can
+be regenerated with:
+
+```bash
+python3 tools/generate_qwen35_smoke_model.py tests/data/qwen35-smoke.gguf
+python3 tools/generate_qwen35_smoke_model.py --architecture qwen3moe tests/data/qwen3moe-smoke.gguf
 ```
 
 Build the native ARM64 Android backend with an installed NDK:
@@ -93,15 +101,26 @@ the default of three workers.
 
 ## Android app
 
-Build from the `android` directory with Gradle 8.7, JDK 17, Android SDK
-platform 35, NDK 27.2.12479018, and SDK CMake 3.22.1:
+Build from the repository root with Gradle 8.7, JDK 17, Android SDK platform
+35, NDK 27.2.12479018, and SDK CMake 3.22.1. The app packages `arm64-v8a` and
+`x86_64` native libraries; the latter is used by the emulator smoke test.
 
 ```bash
-cd android
-gradle assembleDebug
+gradle -p android assembleDebug
 ```
 
 The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
+With an Android 35 x86_64 emulator running, execute the JNI-to-generation
+smoke test and Kotlin session tests with:
+
+```bash
+gradle -p android connectedDebugAndroidTest testDebugUnitTest
+```
+
+The [Android workflow](.github/workflows/android.yml) builds the APK, runs the
+local unit tests, and runs this inference smoke test on an emulator for pushes
+and pull requests.
+
 The app opens GGUF files through Android's system file picker and keeps the
 selected descriptor open while the native runner reads weights from it, so it
 does not copy a multi-gigabyte model into app storage. Generation currently

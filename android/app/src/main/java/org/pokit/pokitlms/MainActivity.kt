@@ -13,10 +13,11 @@ import android.widget.ScrollView
 import android.widget.TextView
 
 class MainActivity : Activity() {
+    private val native = NativeModelBridge()
     private val session = ModelSession(object : ModelSession.Backend {
-        override fun load(fd: Int) = nativeLoad(fd)
-        override fun generate(handle: Long, prompt: String, maxTokens: Int) = nativeGenerate(handle, prompt, maxTokens)
-        override fun close(handle: Long) = nativeClose(handle)
+        override fun load(fd: Int) = native.load(fd)
+        override fun generate(handle: Long, prompt: String, maxTokens: Int) = native.generate(handle, prompt, maxTokens)
+        override fun close(handle: Long) = native.close(handle)
     })
     private var modelLoaded = false
     private lateinit var status: TextView
@@ -25,12 +26,7 @@ class MainActivity : Activity() {
     private lateinit var loadButton: Button
     private lateinit var sendButton: Button
 
-    external fun nativeLoad(fd: Int): Long
-    external fun nativeGenerate(handle: Long, prompt: String, maxTokens: Int): String
-    external fun nativeClose(handle: Long)
-
     companion object {
-        init { System.loadLibrary("pokitlms_android") }
         private const val PICK_MODEL = 41
     }
 

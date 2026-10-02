@@ -93,7 +93,7 @@ void throw_java(JNIEnv* env, const char* type, const std::string& message) {
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_org_pokit_pokitlms_MainActivity_nativeLoad(JNIEnv* env, jobject, jint fd) {
+Java_org_pokit_pokitlms_NativeModelBridge_load(JNIEnv* env, jobject, jint fd) {
     try {
         const std::string path = "/proc/self/fd/" + std::to_string(fd);
         return reinterpret_cast<jlong>(new Engine(path));
@@ -104,8 +104,8 @@ Java_org_pokit_pokitlms_MainActivity_nativeLoad(JNIEnv* env, jobject, jint fd) {
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_org_pokit_pokitlms_MainActivity_nativeGenerate(JNIEnv* env, jobject, jlong handle,
-                                                     jstring prompt, jint max_tokens) {
+Java_org_pokit_pokitlms_NativeModelBridge_generate(JNIEnv* env, jobject, jlong handle,
+                                                    jstring prompt, jint max_tokens) {
     try {
         auto* engine = reinterpret_cast<Engine*>(handle);
         if (!engine) throw std::runtime_error("Model is not loaded");
@@ -120,6 +120,6 @@ Java_org_pokit_pokitlms_MainActivity_nativeGenerate(JNIEnv* env, jobject, jlong 
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_org_pokit_pokitlms_MainActivity_nativeClose(JNIEnv*, jobject, jlong handle) {
+Java_org_pokit_pokitlms_NativeModelBridge_close(JNIEnv*, jobject, jlong handle) {
     delete reinterpret_cast<Engine*>(handle);
 }

@@ -59,6 +59,18 @@ if(POKITLMS_BUILD_TESTS)
     add_executable(pokitlms_regression_tests tests/regression_test.cpp)
     target_link_libraries(pokitlms_regression_tests PRIVATE PokitLMs::pokitlms)
     add_test(NAME pokitlms_regressions COMMAND pokitlms_regression_tests)
+
+    add_executable(pokitlms_qwen35_smoke_tests tests/qwen35_smoke_test.cpp)
+    target_link_libraries(pokitlms_qwen35_smoke_tests PRIVATE PokitLMs::pokitlms)
+    target_compile_definitions(pokitlms_qwen35_smoke_tests PRIVATE
+        POKITLMS_QWEN35_SMOKE_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/qwen35-smoke.gguf")
+    add_test(NAME pokitlms_qwen35_smoke COMMAND pokitlms_qwen35_smoke_tests)
+
+    add_executable(pokitlms_qwen3_moe_smoke_tests tests/qwen3_moe_smoke_test.cpp)
+    target_link_libraries(pokitlms_qwen3_moe_smoke_tests PRIVATE PokitLMs::pokitlms)
+    target_compile_definitions(pokitlms_qwen3_moe_smoke_tests PRIVATE
+        POKITLMS_QWEN3MOE_SMOKE_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/qwen3moe-smoke.gguf")
+    add_test(NAME pokitlms_qwen3_moe_smoke COMMAND pokitlms_qwen3_moe_smoke_tests)
 endif()
 
 if(POKITLMS_BUILD_BENCHMARK)
