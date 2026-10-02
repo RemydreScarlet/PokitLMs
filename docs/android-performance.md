@@ -552,10 +552,29 @@ stays because the 2B end-to-end result improved in both alternating runs and
 the Q6_K shader work consistently fell; the 9B result is recorded as
 inconclusive for total decode speed.
 
-All runs used the host RTX 2070 SUPER and the resident Vulkan model cache; no
-35B generation or Android inference was performed. Each process read the
-model during initial cache fill, then generated from the resident GPU copy.
-Captures are
+The 35B-A3B GGUF contains 115 Q6_K matrix tensors. On its actual expert down
+projection `blk.0.ffn_down_exps.weight`, a bounded 8 MiB-window probe ran eight
+warm calls per measurement with full-model caching disabled. Two baseline
+runs averaged 6.403 ms of GPU compute and 7.432 ms total across the eight
+calls; two lane-32 runs averaged 5.959 ms and 7.010 ms, reductions of 6.9% in
+GPU compute and 5.7% in total probe time. Each run also passed the 514-matrix,
+1,542-slice parity sweep; Q6_K maximum absolute error was `7.15e-7`. This is a
+single-matrix microbenchmark, not a 35B generation result. Captures are
+`$HOME/.local/share/pokitlms-tools/logs/qwen35-35b-q6-expert-{baseline1,candidate1,candidate2,baseline2}-20261003.log`.
+
+The optimized Android benchmark APK also passed its kernel-only instrumentation
+test on Pixel 9a's Mali-G715. That device reports subgroup size 16, so it
+exercises the generic Q6_K subgroup loop and workgroup path rather than the
+lane-32 specialization. Q6_K maximum absolute error was `3.05e-4` in the
+workgroup check. Available RAM was about 1.04 GiB before the test, so no model
+was opened and no Android inference was run. Build, instrumentation, and
+logcat captures are in
+`$HOME/.local/share/pokitlms-tools/logs/android-q6-lane32-*-20261003.log`.
+
+The 2B/9B generation tests used the host RTX 2070 SUPER and resident Vulkan
+model cache; 35B used only bounded tensor windows with model caching disabled.
+The full 35B model was not generated. Each 2B/9B process read its model during
+initial cache fill, then generated from the resident GPU copy. Captures are
 `$HOME/.local/share/pokitlms-tools/logs/qwen35-{2b,9b}-q6-lane32-*-20261003.log`.
 
 ### Workgroup-size A/B on Qwen3.5-9B
