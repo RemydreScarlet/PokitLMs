@@ -121,9 +121,9 @@ void decode_q2_k(const std::byte* block, std::array<float, 256>& values) {
 }
 
 void decode_q3_k(const std::byte* block, std::array<float, 256>& values) {
-    const auto* quants = block + 2;
-    const auto* high_mask = block + 66;
-    const auto* packed_scales = block + 98;
+    const auto* high_mask = block;
+    const auto* quants = block + 32;
+    const auto* packed_scales = block + 96;
     std::array<std::uint32_t, 4> aux{};
     aux[0] = read_u32(packed_scales);
     aux[1] = read_u32(packed_scales + 4);
@@ -137,7 +137,7 @@ void decode_q3_k(const std::byte* block, std::array<float, 256>& values) {
     aux[1] = (aux[1] & mask2) | (((tmp >> 2) & mask1) << 4);
     std::array<std::int8_t, 16> scales{};
     std::memcpy(scales.data(), aux.data(), 16);
-    const float d = half_to_float(read_u16(block));
+    const float d = half_to_float(read_u16(block + 108));
     std::size_t out = 0;
     std::size_t si = 0;
     std::uint8_t bit = 1;
@@ -287,8 +287,8 @@ void decode_q5_k(const std::byte* block, std::array<float, 256>& values) {
     const float d = half_to_float(read_u16(block));
     const float dmin = half_to_float(read_u16(block + 2));
     const auto* packed_scales = block + 4;
-    const auto* quants = block + 16;
-    const auto* high = block + 144;
+    const auto* high = block + 16;
+    const auto* quants = block + 48;
     auto scale_min = [packed_scales](std::size_t j) {
         std::pair<std::uint8_t, std::uint8_t> result;
         if (j < 4) {

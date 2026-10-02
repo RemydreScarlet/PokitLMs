@@ -1,5 +1,10 @@
 /build/
 /out/
+/.gradle-user/
+android/.gradle/
+android/.kotlin/
+android/app/.cxx/
+android/app/build/
 .vscode/
 .idea/
 .DS_Store

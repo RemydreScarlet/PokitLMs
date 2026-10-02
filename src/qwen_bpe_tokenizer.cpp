@@ -23,6 +23,7 @@ bool in_ranges(char32_t value, const CodepointRange (&ranges)[N]) {
 }
 
 bool is_letter(char32_t cp) { return in_ranges(cp, kUnicodeLetters); }
+bool is_mark(char32_t cp) { return in_ranges(cp, kUnicodeMarks); }
 bool is_number(char32_t cp) { return in_ranges(cp, kUnicodeNumbers); }
 bool is_whitespace(char32_t cp) { return in_ranges(cp, kUnicodeWhitespace); }
 
@@ -145,6 +146,7 @@ struct QwenBpeTokenizer::Impl {
     std::vector<TrieNode> special_trie{1};
     std::uint32_t bos{};
     std::uint32_t eos{};
+    bool include_marks{};
 
     explicit Impl(const GgufReader& model) {
         const auto pre = model.metadata().find("tokenizer.ggml.pre");
@@ -152,6 +154,7 @@ struct QwenBpeTokenizer::Impl {
         if (!pre_name || (*pre_name != "qwen2" && *pre_name != "qwen35")) {
             throw std::runtime_error("Qwen tokenizer requires tokenizer.ggml.pre=qwen2 or qwen35");
         }
+        include_marks = *pre_name == "qwen35";
         const auto model_type = model.metadata().find("tokenizer.ggml.model");
         const auto* model_name = model_type == model.metadata().end() ? nullptr : std::get_if<std::string>(&model_type->second.value);
         if (!model_name || *model_name != "gpt2") {
@@ -316,10 +319,13 @@ struct QwenBpeTokenizer::Impl {
     std::size_t pretoken_end(const std::vector<Codepoint>& cp, std::size_t start) const {
         const auto count = cp.size();
         auto value = [&](std::size_t i) { return cp[i].value; };
+        auto word = [&](char32_t c) { return is_letter(c) || (include_marks && is_mark(c)); };
         auto contraction = [&](std::string_view suffix) {
             if (start + suffix.size() + 1 > count || value(start) != '\'') return false;
             for (std::size_t i = 0; i < suffix.size(); ++i) {
-                if (value(start + i + 1) != static_cast<unsigned char>(suffix[i])) return false;
+                auto c = value(start + i + 1);
+                if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+                if (c != static_cast<unsigned char>(suffix[i])) return false;
             }
             return true;
         };
@@ -329,23 +335,28 @@ struct QwenBpeTokenizer::Impl {
             if (contraction(suffix)) return start + suffix.size() + 1;
         }
 
+        // Qwen2: [^\r\n\p{L}\p{N}]?\p{L}+
+        // Qwen3.5 adds combining marks to the word body, but not to the prefix exclusion.
         std::size_t content = start;
-        if (value(start) == ' ' && start + 1 < count) content++;
-        if (content < count && is_letter(value(content))) {
+        if (start + 1 < count && value(start) != '\r' && value(start) != '\n' &&
+            !is_letter(value(start)) && !is_number(value(start)) && word(value(start + 1))) {
+            ++content;
+        }
+        if (word(value(content))) {
             std::size_t end = content + 1;
-            while (end < count && is_letter(value(end))) ++end;
+            while (end < count && word(value(end))) ++end;
             return end;
         }
-        if (content < count && is_number(value(content))) {
-            std::size_t end = content + 1;
-            while (end < count && is_number(value(end))) ++end;
-            return end;
-        }
+        // Both declared pre-tokenizers split numbers one codepoint at a time.
+        if (is_number(value(start))) return start + 1;
+
+        content = start;
+        if (value(start) == ' ' && start + 1 < count) ++content;
         if (content < count && !is_whitespace(value(content)) &&
-            !is_letter(value(content)) && !is_number(value(content))) {
+            !word(value(content)) && !is_number(value(content))) {
             std::size_t end = content + 1;
             while (end < count && !is_whitespace(value(end)) &&
-                   !is_letter(value(end)) && !is_number(value(end))) ++end;
+                   !word(value(end)) && !is_number(value(end))) ++end;
             while (end < count && (value(end) == '\r' || value(end) == '\n')) ++end;
             return end;
         }

@@ -37,7 +37,13 @@ pokitlms::model::GenerationOptions convert_options(const pokitlms_generation_opt
 }  // namespace
 
 const char* pokitlms_version(void) {
-    return "0.4.0";
+#define POKITLMS_STRINGIFY_IMPL(value) #value
+#define POKITLMS_STRINGIFY(value) POKITLMS_STRINGIFY_IMPL(value)
+    return POKITLMS_STRINGIFY(POKITLMS_VERSION_MAJOR) "."
+           POKITLMS_STRINGIFY(POKITLMS_VERSION_MINOR) "."
+           POKITLMS_STRINGIFY(POKITLMS_VERSION_PATCH);
+#undef POKITLMS_STRINGIFY
+#undef POKITLMS_STRINGIFY_IMPL
 }
 
 void pokitlms_generation_options_init(pokitlms_generation_options* options) {

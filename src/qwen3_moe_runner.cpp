@@ -51,7 +51,7 @@ std::size_t auto_expert_cache_budget() {
     MEMORYSTATUSEX status{};
     status.dwLength = sizeof(status);
     if (::GlobalMemoryStatusEx(&status)) available_bytes = status.ullAvailPhys;
-#else
+#elif defined(__linux__)
     std::ifstream meminfo("/proc/meminfo");
     std::string key;
     std::uint64_t value = 0;
@@ -63,6 +63,7 @@ std::size_t auto_expert_cache_budget() {
             break;
         }
     }
+#if defined(_SC_AVPHYS_PAGES)
     if (available_bytes == 0) {
         const auto pages = ::sysconf(_SC_AVPHYS_PAGES);
         const auto page_size = ::sysconf(_SC_PAGESIZE);
@@ -73,6 +74,7 @@ std::size_t auto_expert_cache_budget() {
                               static_cast<std::uint64_t>(page_size);
         }
     }
+#endif
 #endif
     if (available_bytes == 0) return fallback;
     const auto quarter = available_bytes / 4U;

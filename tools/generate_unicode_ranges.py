@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate compact Unicode L/N/White_Space ranges for Qwen's pre-tokenizer."""
+"""Generate compact Unicode L/M/N/White_Space ranges for Qwen's pre-tokenizer."""
 
 import unicodedata
 from pathlib import Path
@@ -23,6 +23,7 @@ def ranges_for(predicate):
 
 tables = {
     "kUnicodeLetters": ranges_for(lambda cp: unicodedata.category(chr(cp)).startswith("L")),
+    "kUnicodeMarks": ranges_for(lambda cp: unicodedata.category(chr(cp)).startswith("M")),
     "kUnicodeNumbers": ranges_for(lambda cp: unicodedata.category(chr(cp)).startswith("N")),
     "kUnicodeWhitespace": ranges_for(
         lambda cp: unicodedata.category(chr(cp)).startswith("Z") or cp in (0x85, 0xA0)

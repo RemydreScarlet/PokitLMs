@@ -1,6 +1,6 @@
 # PokitLMs
 
-PokitLMs is a native, mobile-first LLM inference backend in C++20. The runtime is being built in this repository; it does not embed or fetch llama.cpp. There is currently no application frontend.
+PokitLMs is a native, mobile-first LLM inference backend and Android app in C++20/Kotlin. The runtime is implemented in this repository; it does not embed or fetch llama.cpp. The first Android app supports the currently implemented Qwen3-MoE and Qwen3.5 GGUF runners.
 
 ## Direction
 
@@ -52,7 +52,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 
 ## Build
 
-Requirements: CMake 3.24+ and a C++20 compiler.
+Requirements: CMake 3.22+ and a C++20 compiler.
 
 ```bash
 cmake -S . -B build -DPOKITLMS_BUILD_TESTS=ON
@@ -90,6 +90,23 @@ The C++ runner accepts the worker count as its final constructor argument.
 The C API exposes the same setting through
 `pokitlms_qwen3moe_create_ex_with_io_threads`; existing create functions keep
 the default of three workers.
+
+## Android app
+
+Build from the `android` directory with Gradle 8.7, JDK 17, Android SDK
+platform 35, NDK 27.2.12479018, and SDK CMake 3.22.1:
+
+```bash
+cd android
+gradle assembleDebug
+```
+
+The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
+The app opens GGUF files through Android's system file picker and keeps the
+selected descriptor open while the native runner reads weights from it, so it
+does not copy a multi-gigabyte model into app storage. Generation currently
+returns a complete reply when decoding finishes; streaming and cancellation
+remain future work.
 
 ## Near-term backend work
 

@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <string>
 #include <string_view>
 
 int main() {
@@ -11,7 +12,9 @@ int main() {
 
     Tensor tensor({4});
     assert(tensor.numel() == 4);
-    assert(std::string_view(pokitlms_version()) == "0.1.0");
+    const auto expected_version = std::to_string(POKITLMS_VERSION_MAJOR) + "." +
+        std::to_string(POKITLMS_VERSION_MINOR) + "." + std::to_string(POKITLMS_VERSION_PATCH);
+    assert(std::string_view(pokitlms_version()) == expected_version);
 
     const float input[] = {1.0F, 2.0F, 3.0F, 4.0F};
     const float weight[] = {1.0F, 1.0F, 1.0F, 1.0F};

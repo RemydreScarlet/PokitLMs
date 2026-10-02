@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 
 project(PokitLMs VERSION 0.4.0 LANGUAGES CXX)
 
@@ -6,6 +6,7 @@ find_package(Threads REQUIRED)
 
 option(POKITLMS_BUILD_TESTS "Build PokitLMs tests" ON)
 option(POKITLMS_BUILD_BENCHMARK "Build the model-backed inference benchmark CLI" ON)
+option(POKITLMS_BUILD_ANDROID_APP "Build the Android JNI bridge" OFF)
 
 add_library(pokitlms
     src/tensor.cpp
@@ -53,6 +54,9 @@ if(POKITLMS_BUILD_TESTS)
     add_executable(pokitlms_tests tests/smoke_test.cpp)
     target_link_libraries(pokitlms_tests PRIVATE PokitLMs::pokitlms)
     add_test(NAME pokitlms_smoke COMMAND pokitlms_tests)
+    add_executable(pokitlms_regression_tests tests/regression_test.cpp)
+    target_link_libraries(pokitlms_regression_tests PRIVATE PokitLMs::pokitlms)
+    add_test(NAME pokitlms_regressions COMMAND pokitlms_regression_tests)
 endif()
 
 if(POKITLMS_BUILD_BENCHMARK)
@@ -61,4 +65,10 @@ if(POKITLMS_BUILD_BENCHMARK)
 
     add_executable(pokitlms-qwen35-bench tools/qwen35_benchmark.cpp)
     target_link_libraries(pokitlms-qwen35-bench PRIVATE PokitLMs::pokitlms)
+endif()
+
+if(ANDROID AND POKITLMS_BUILD_ANDROID_APP)
+    add_library(pokitlms_android SHARED android/app/src/main/cpp/jni.cpp)
+    target_link_libraries(pokitlms_android PRIVATE PokitLMs::pokitlms)
+    target_compile_features(pokitlms_android PRIVATE cxx_std_20)
 endif()

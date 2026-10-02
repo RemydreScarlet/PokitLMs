@@ -53,7 +53,7 @@ public:
     }
 
     void read_into(std::uint64_t offset, std::span<std::byte> destination,
-                   bool discard_cache = false) const {
+                   [[maybe_unused]] bool discard_cache = false) const {
         if (offset > file_size || destination.size() > file_size - offset) {
             throw std::out_of_range("model file read exceeds file bounds");
         }
@@ -84,6 +84,7 @@ public:
             if (count <= 0) throw std::runtime_error("failed to read model file: " + path.string());
             completed += static_cast<std::size_t>(count);
         }
+#if defined(POSIX_FADV_DONTNEED)
         if (discard_cache) {
             const long page_size = ::sysconf(_SC_PAGESIZE);
             if (page_size > 0) {
@@ -97,6 +98,7 @@ public:
                                       static_cast<off_t>(rounded_end - begin), POSIX_FADV_DONTNEED);
             }
         }
+#endif
 #endif
         bytes_read.fetch_add(destination.size(), std::memory_order_relaxed);
     }
