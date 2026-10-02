@@ -88,7 +88,11 @@ def encode_gguf(
     return bytes(result)
 
 
-def make_qwen35_model() -> bytes:
+def make_qwen35_model(architecture: str = "qwen35") -> bytes:
+    if architecture not in ("qwen35", "qwen35moe"):
+        raise ValueError(f"unsupported Qwen3.5 fixture architecture: {architecture}")
+    is_moe = architecture == "qwen35moe"
+    prefix = architecture + "."
     symbols = byte_symbols()
     tokens = symbols + ["<|endoftext|>"]
     eos_id = len(tokens) - 1
@@ -108,28 +112,36 @@ def make_qwen35_model() -> bytes:
     def array_metadata(key: str, element_type: int, values: list[bytes]) -> None:
         metadata.append((key, array(element_type, values)))
 
-    string_metadata("general.architecture", "qwen35")
+    string_metadata("general.architecture", architecture)
     integer_metadata("general.alignment", 32)
-    integer_metadata("qwen35.context_length", 512)
-    integer_metadata("qwen35.embedding_length", 4)
-    integer_metadata("qwen35.block_count", 2)
-    integer_metadata("qwen35.feed_forward_length", 4)
-    integer_metadata("qwen35.attention.head_count", 1)
-    integer_metadata("qwen35.attention.head_count_kv", 1)
-    integer_metadata("qwen35.attention.key_length", 2)
-    integer_metadata("qwen35.attention.value_length", 2)
-    integer_metadata("qwen35.rope.dimension_count", 2)
-    integer_metadata("qwen35.ssm.conv_kernel", 2)
-    integer_metadata("qwen35.ssm.state_size", 2)
-    integer_metadata("qwen35.ssm.group_count", 1)
-    integer_metadata("qwen35.ssm.time_step_rank", 1)
-    integer_metadata("qwen35.ssm.inner_size", 2)
-    integer_metadata("qwen35.full_attention_interval", 2)
-    array_metadata("qwen35.rope.dimension_sections", 5,
+    integer_metadata(prefix + "context_length", 512)
+    integer_metadata(prefix + "embedding_length", 4)
+    integer_metadata(prefix + "block_count", 2)
+    integer_metadata(prefix + "feed_forward_length", 4)
+    integer_metadata(prefix + "attention.head_count", 1)
+    integer_metadata(prefix + "attention.head_count_kv", 1)
+    integer_metadata(prefix + "attention.key_length", 2)
+    integer_metadata(prefix + "attention.value_length", 2)
+    integer_metadata(prefix + "rope.dimension_count", 2)
+    integer_metadata(prefix + "ssm.conv_kernel", 2)
+    integer_metadata(prefix + "ssm.state_size", 2)
+    integer_metadata(prefix + "ssm.group_count", 1)
+    integer_metadata(prefix + "ssm.time_step_rank", 1)
+    integer_metadata(prefix + "ssm.inner_size", 2)
+    integer_metadata(prefix + "full_attention_interval", 2)
+    array_metadata(prefix + "rope.dimension_sections", 5,
                    [struct.pack("<i", value) for value in (1, 0, 0, 0)])
-    float_metadata("qwen35.attention.layer_norm_rms_epsilon", 1.0e-5)
-    float_metadata("qwen35.rope.freq_base", 10000.0)
-    metadata.append(("qwen35.tie_word_embeddings", u32(7) + b"\x00"))
+    float_metadata(prefix + "attention.layer_norm_rms_epsilon", 1.0e-5)
+    float_metadata(prefix + "rope.freq_base", 10000.0)
+    metadata.append((prefix + "tie_word_embeddings", u32(7) + b"\x00"))
+    if is_moe:
+        integer_metadata(prefix + "expert_count", 2)
+        integer_metadata(prefix + "expert_used_count", 1)
+        integer_metadata(prefix + "expert_feed_forward_length", 4)
+        integer_metadata(prefix + "expert_shared_feed_forward_length", 4)
+        metadata.append((prefix + "expert_weights_norm", u32(7) + b"\x01"))
+        array_metadata(prefix + "attention.recurrent_layers", 5,
+                       [struct.pack("<i", value) for value in (1, 0)])
     string_metadata("tokenizer.ggml.pre", "qwen35")
     string_metadata("tokenizer.ggml.model", "gpt2")
     array_metadata("tokenizer.ggml.tokens", 8, [gguf_string(token) for token in tokens])
@@ -155,9 +167,19 @@ def make_qwen35_model() -> bytes:
 
     add("blk.0.attn_norm.weight", (4,), [1.0] * 4)
     add("blk.0.post_attention_norm.weight", (4,), [1.0] * 4)
-    add("blk.0.ffn_gate.weight", (4, 4), [0.0] * 16)
-    add("blk.0.ffn_up.weight", (4, 4), [0.0] * 16)
-    add("blk.0.ffn_down.weight", (4, 4), [0.0] * 16)
+    if is_moe:
+        add("blk.0.ffn_gate_inp.weight", (4, 2), [0.0] * 8)
+        add("blk.0.ffn_gate_exps.weight", (4, 4, 2), [0.0] * 32)
+        add("blk.0.ffn_up_exps.weight", (4, 4, 2), [0.0] * 32)
+        add("blk.0.ffn_down_exps.weight", (4, 4, 2), [0.0] * 32)
+        add("blk.0.ffn_gate_inp_shexp.weight", (4,), [0.0] * 4)
+        add("blk.0.ffn_gate_shexp.weight", (4, 4), [0.0] * 16)
+        add("blk.0.ffn_up_shexp.weight", (4, 4), [0.0] * 16)
+        add("blk.0.ffn_down_shexp.weight", (4, 4), [0.0] * 16)
+    else:
+        add("blk.0.ffn_gate.weight", (4, 4), [0.0] * 16)
+        add("blk.0.ffn_up.weight", (4, 4), [0.0] * 16)
+        add("blk.0.ffn_down.weight", (4, 4), [0.0] * 16)
     add("blk.0.attn_qkv.weight", (4, 6), [0.0] * 24)
     add("blk.0.attn_gate.weight", (4, 2), [0.0] * 8)
     add("blk.0.ssm_a", (1,), [0.0])
@@ -170,9 +192,19 @@ def make_qwen35_model() -> bytes:
 
     add("blk.1.attn_norm.weight", (4,), [1.0] * 4)
     add("blk.1.post_attention_norm.weight", (4,), [1.0] * 4)
-    add("blk.1.ffn_gate.weight", (4, 4), [0.0] * 16)
-    add("blk.1.ffn_up.weight", (4, 4), [0.0] * 16)
-    add("blk.1.ffn_down.weight", (4, 4), [0.0] * 16)
+    if is_moe:
+        add("blk.1.ffn_gate_inp.weight", (4, 2), [0.0] * 8)
+        add("blk.1.ffn_gate_exps.weight", (4, 4, 2), [0.0] * 32)
+        add("blk.1.ffn_up_exps.weight", (4, 4, 2), [0.0] * 32)
+        add("blk.1.ffn_down_exps.weight", (4, 4, 2), [0.0] * 32)
+        add("blk.1.ffn_gate_inp_shexp.weight", (4,), [0.0] * 4)
+        add("blk.1.ffn_gate_shexp.weight", (4, 4), [0.0] * 16)
+        add("blk.1.ffn_up_shexp.weight", (4, 4), [0.0] * 16)
+        add("blk.1.ffn_down_shexp.weight", (4, 4), [0.0] * 16)
+    else:
+        add("blk.1.ffn_gate.weight", (4, 4), [0.0] * 16)
+        add("blk.1.ffn_up.weight", (4, 4), [0.0] * 16)
+        add("blk.1.ffn_down.weight", (4, 4), [0.0] * 16)
     add("blk.1.attn_q.weight", (4, 4), [0.0] * 16)
     add("blk.1.attn_k.weight", (4, 2), [0.0] * 8)
     add("blk.1.attn_v.weight", (4, 2), [0.0] * 8)
@@ -259,10 +291,13 @@ def make_qwen3moe_model() -> bytes:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("output", type=Path)
-    parser.add_argument("--architecture", choices=("qwen35", "qwen3moe"), default="qwen35")
+    parser.add_argument("--architecture", choices=("qwen35", "qwen35moe", "qwen3moe"), default="qwen35")
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    model = make_qwen35_model() if args.architecture == "qwen35" else make_qwen3moe_model()
+    if args.architecture == "qwen3moe":
+        model = make_qwen3moe_model()
+    else:
+        model = make_qwen35_model(args.architecture)
     args.output.write_bytes(model)
 
 

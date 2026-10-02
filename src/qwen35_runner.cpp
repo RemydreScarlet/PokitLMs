@@ -7,15 +7,29 @@
 #include "pokitlms/ops/gated_delta_net.hpp"
 #include "pokitlms/ops/quantized_linear.hpp"
 #include "pokitlms/ops/rms_norm.hpp"
+#include "pokitlms/storage/expert_store.hpp"
 #include "simd_kernels.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
+#include <fstream>
+#include <functional>
+#include <future>
 #include <limits>
+#include <mutex>
+#include <numeric>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <type_traits>
 #include <utility>
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 namespace pokitlms::model {
 namespace {
@@ -52,8 +66,8 @@ std::vector<float> load_matrix_values(const std::shared_ptr<storage::ModelFile>&
     return reader.read_float_rows(0, static_cast<std::size_t>(reader.row_count()));
 }
 
-void prepare_rope(std::uint64_t position, std::size_t rotary_dimension, float theta,
-                  const std::array<std::uint64_t, 4>& sections,
+void prepare_rope(std::uint64_t position, std::size_t rotary_dimension,
+                  const std::array<std::uint64_t, 4>& sections, float theta,
                   std::span<float> cosine, std::span<float> sine) {
     if (rotary_dimension == 0 || rotary_dimension % 2 != 0 ||
         cosine.size() != rotary_dimension / 2 || sine.size() != cosine.size() ||
@@ -61,16 +75,17 @@ void prepare_rope(std::uint64_t position, std::size_t rotary_dimension, float th
         throw std::invalid_argument("invalid Qwen3.5 RoPE parameters");
     }
     const auto half = rotary_dimension / 2;
-    const auto section_count = sections[0] + sections[1] + sections[2] + sections[3];
-    if (section_count == 0 || section_count > half) {
-        throw std::invalid_argument("invalid Qwen3.5 IMRoPE sections");
-    }
+    const auto section_total = std::accumulate(sections.begin(), sections.end(),
+                                               std::uint64_t{});
+    if (section_total == 0) throw std::invalid_argument("empty Qwen3.5 MRoPE sections");
+    // Text input uses [position, position, position, 0] for the four MRoPE
+    // axes. Multimodal image/video positions require a separate path.
     for (std::size_t pair = 0; pair < half; ++pair) {
-        const auto sector = pair % section_count;
-        const bool uses_text_position = sector % 3 == 0 && sector / 3 < sections[0];
         const float exponent = -static_cast<float>(pair) / static_cast<float>(half);
-        const float angle = uses_text_position
-            ? static_cast<float>(position) * std::pow(theta, exponent) : 0.0F;
+        const auto sector = static_cast<std::uint64_t>(pair) % section_total;
+        const bool extra_axis = sector >= sections[0] + sections[1] + sections[2];
+        const auto axis_position = extra_axis ? 0.0F : static_cast<float>(position);
+        const float angle = axis_position * std::pow(theta, exponent);
         cosine[pair] = std::cos(angle);
         sine[pair] = std::sin(angle);
     }
@@ -107,15 +122,192 @@ float softplus(float value) noexcept {
 
 float silu(float value) noexcept { return value * sigmoid(value); }
 
+struct ExpertRoute {
+    std::size_t id{};
+    float weight{};
+    float logit{};
+};
+
+std::vector<ExpertRoute> select_experts(std::span<const float> logits, std::size_t top_k,
+                                        bool normalize) {
+    if (top_k == 0 || top_k > logits.size()) throw std::invalid_argument("invalid Qwen3.5 expert top-k");
+    const float maximum = *std::max_element(logits.begin(), logits.end());
+    if (!std::isfinite(maximum) || std::any_of(logits.begin(), logits.end(),
+        [](float value) { return !std::isfinite(value); })) {
+        throw std::runtime_error("Qwen3.5 expert router produced non-finite logits");
+    }
+    float denominator = 0.0F;
+    std::vector<float> probabilities(logits.size());
+    for (std::size_t id = 0; id < logits.size(); ++id) {
+        probabilities[id] = std::exp(logits[id] - maximum);
+        denominator += probabilities[id];
+    }
+    if (!std::isfinite(denominator) || denominator <= 0.0F) {
+        throw std::runtime_error("Qwen3.5 expert router softmax is invalid");
+    }
+    for (auto& probability : probabilities) probability /= denominator;
+
+    std::vector<ExpertRoute> routes;
+    routes.reserve(top_k);
+    for (std::size_t id = 0; id < logits.size(); ++id) {
+        const ExpertRoute candidate{id, probabilities[id], logits[id]};
+        const auto where = std::lower_bound(routes.begin(), routes.end(), candidate,
+            [](const ExpertRoute& lhs, const ExpertRoute& rhs) {
+                return lhs.logit > rhs.logit || (lhs.logit == rhs.logit && lhs.id < rhs.id);
+            });
+        if (routes.size() < top_k) routes.insert(where, candidate);
+        else if (where != routes.end()) {
+            routes.insert(where, candidate);
+            routes.pop_back();
+        }
+    }
+    if (normalize) {
+        float sum = 0.0F;
+        for (const auto& route : routes) sum += route.weight;
+        if (!std::isfinite(sum) || sum <= 0.0F) {
+            throw std::runtime_error("Qwen3.5 selected expert weights are invalid");
+        }
+        for (auto& route : routes) route.weight /= sum;
+    }
+    return routes;
+}
+
+std::size_t automatic_expert_cache_budget() {
+    constexpr std::size_t fallback = 128U * 1024U * 1024U;
+#if defined(__ANDROID__)
+    constexpr std::uint64_t ceiling = 2ULL * 1024U * 1024U * 1024U;
+#else
+    constexpr std::uint64_t ceiling = 4ULL * 1024U * 1024U * 1024U;
+#endif
+    std::uint64_t available = 0;
+#if defined(__linux__)
+    std::ifstream meminfo("/proc/meminfo");
+    std::string key;
+    std::uint64_t value = 0;
+    std::string unit;
+    while (meminfo >> key >> value >> unit) {
+        if (key == "MemAvailable:" && unit == "kB") {
+            available = value > std::numeric_limits<std::uint64_t>::max() / 1024U
+                ? std::numeric_limits<std::uint64_t>::max() : value * 1024U;
+            break;
+        }
+    }
+#endif
+#if !defined(_WIN32) && defined(_SC_AVPHYS_PAGES)
+    if (available == 0) {
+        const auto pages = ::sysconf(_SC_AVPHYS_PAGES);
+        const auto page_size = ::sysconf(_SC_PAGESIZE);
+        if (pages > 0 && page_size > 0 &&
+            static_cast<std::uint64_t>(pages) <=
+                std::numeric_limits<std::uint64_t>::max() / static_cast<std::uint64_t>(page_size)) {
+            available = static_cast<std::uint64_t>(pages) * static_cast<std::uint64_t>(page_size);
+        }
+    }
+#endif
+    if (available == 0) return fallback;
+    return static_cast<std::size_t>(std::min<std::uint64_t>(available / 4U, ceiling));
+}
+
+TensorInfo expert_view(const TensorInfo& tensor, const storage::ExpertSlice& slice) {
+    TensorInfo view;
+    view.name = tensor.name;
+    view.dimensions = {tensor.dimensions[0], tensor.dimensions[1]};
+    view.type = tensor.type;
+    view.file_offset = slice.offset;
+    view.payload_size = slice.size;
+    return view;
+}
+
+class ExpertIoLoader {
+public:
+    explicit ExpertIoLoader(std::size_t worker_count) {
+        workers_.reserve(worker_count);
+        try {
+            for (std::size_t i = 0; i < worker_count; ++i) {
+                workers_.emplace_back([this] { run(); });
+            }
+        } catch (...) {
+            {
+                std::lock_guard lock(mutex_);
+                stopping_ = true;
+            }
+            ready_.notify_all();
+            for (auto& worker : workers_) if (worker.joinable()) worker.join();
+            throw;
+        }
+    }
+
+    ~ExpertIoLoader() {
+        {
+            std::lock_guard lock(mutex_);
+            stopping_ = true;
+        }
+        ready_.notify_all();
+        for (auto& worker : workers_) worker.join();
+    }
+
+    ExpertIoLoader(const ExpertIoLoader&) = delete;
+    ExpertIoLoader& operator=(const ExpertIoLoader&) = delete;
+
+    template <typename Work>
+    [[nodiscard]] auto submit(Work&& work) {
+        using Result = std::invoke_result_t<Work>;
+        auto task = std::make_shared<std::packaged_task<Result()>>(std::forward<Work>(work));
+        auto result = task->get_future();
+        {
+            std::lock_guard lock(mutex_);
+            if (stopping_) throw std::logic_error("Qwen3.5 expert loader is stopping");
+            tasks_.emplace_back([task] { (*task)(); });
+        }
+        ready_.notify_one();
+        return result;
+    }
+
+private:
+    void run() {
+        for (;;) {
+            std::function<void()> task;
+            {
+                std::unique_lock lock(mutex_);
+                ready_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
+                if (tasks_.empty() && stopping_) return;
+                task = std::move(tasks_.front());
+                tasks_.pop_front();
+            }
+            task();
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::deque<std::function<void()>> tasks_;
+    bool stopping_{};
+    std::vector<std::thread> workers_;
+};
+
+struct PendingExpertWeights {
+    std::future<std::shared_ptr<const std::vector<std::byte>>> gate;
+    std::future<std::shared_ptr<const std::vector<std::byte>>> up;
+    std::future<std::shared_ptr<const std::vector<std::byte>>> down;
+};
+
 struct LayerReaders {
     explicit LayerReaders(const std::shared_ptr<storage::ModelFile>& file,
-                          const Qwen35LayerTensors& tensors)
+                          const Qwen35LayerTensors& tensors, bool mixture_of_experts)
         : full_attention(tensors.full_attention),
-          feed_forward_gate(file, tensors.feed_forward_gate),
-          feed_forward_up(file, tensors.feed_forward_up),
-          feed_forward_down(file, tensors.feed_forward_down),
           attention_norm(load_vector(file, tensors.attention_norm)),
           post_attention_norm(load_vector(file, tensors.post_attention_norm)) {
+        if (mixture_of_experts) {
+            router = std::make_unique<TensorReader>(file, tensors.router);
+            shared_expert_router = std::make_unique<TensorReader>(file, tensors.shared_expert_router);
+            shared_expert_gate = std::make_unique<TensorReader>(file, tensors.shared_expert_gate);
+            shared_expert_up = std::make_unique<TensorReader>(file, tensors.shared_expert_up);
+            shared_expert_down = std::make_unique<TensorReader>(file, tensors.shared_expert_down);
+        } else {
+            feed_forward_gate = std::make_unique<TensorReader>(file, tensors.feed_forward_gate);
+            feed_forward_up = std::make_unique<TensorReader>(file, tensors.feed_forward_up);
+            feed_forward_down = std::make_unique<TensorReader>(file, tensors.feed_forward_down);
+        }
         if (full_attention) {
             query = std::make_unique<TensorReader>(file, tensors.query);
             key = std::make_unique<TensorReader>(file, tensors.key);
@@ -137,9 +329,14 @@ struct LayerReaders {
     }
 
     bool full_attention;
-    TensorReader feed_forward_gate;
-    TensorReader feed_forward_up;
-    TensorReader feed_forward_down;
+    std::unique_ptr<TensorReader> feed_forward_gate;
+    std::unique_ptr<TensorReader> feed_forward_up;
+    std::unique_ptr<TensorReader> feed_forward_down;
+    std::unique_ptr<TensorReader> router;
+    std::unique_ptr<TensorReader> shared_expert_router;
+    std::unique_ptr<TensorReader> shared_expert_gate;
+    std::unique_ptr<TensorReader> shared_expert_up;
+    std::unique_ptr<TensorReader> shared_expert_down;
     std::vector<float> attention_norm;
     std::vector<float> post_attention_norm;
     std::unique_ptr<TensorReader> query;
@@ -178,6 +375,9 @@ struct ForwardScratch {
     std::vector<float> ffn_gate;
     std::vector<float> ffn_up;
     std::vector<float> ffn_activated;
+    std::vector<float> router_logits;
+    std::vector<float> moe_result;
+    std::vector<float> expert_output;
     std::vector<float> final_hidden;
     std::vector<float> rope_cosine;
     std::vector<float> rope_sine;
@@ -189,6 +389,13 @@ struct ForwardScratch {
 
 class Qwen35Runner::Impl {
 public:
+    struct RoutedExpertStores {
+        std::array<std::vector<storage::ExpertSlice>, 3> slices;
+        std::unique_ptr<storage::ExpertStore> gate;
+        std::unique_ptr<storage::ExpertStore> up;
+        std::unique_ptr<storage::ExpertStore> down;
+    };
+
     Impl(std::filesystem::path path, std::size_t requested_context,
          KvCachePrecision kv_precision)
         : model_path(std::move(path)), gguf(model_path),
@@ -204,7 +411,10 @@ public:
         }
 
         const auto hidden = as_size(config.embedding_length, "embedding_length");
-        const auto ffn = as_size(config.feed_forward_length, "feed_forward_length");
+        const auto ffn = as_size(config.mixture_of_experts
+            ? std::max(config.expert_feed_forward_length,
+                       config.shared_expert_feed_forward_length)
+            : config.feed_forward_length, "feed_forward_length");
         const auto attention_heads = as_size(config.attention_heads, "attention_heads");
         const auto kv_heads = as_size(config.key_value_heads, "key_value_heads");
         const auto head_dim = as_size(config.attention_head_length, "attention_head_length");
@@ -247,17 +457,46 @@ public:
         scratch.ffn_gate.resize(ffn);
         scratch.ffn_up.resize(ffn);
         scratch.ffn_activated.resize(ffn);
+        if (config.mixture_of_experts) {
+            scratch.router_logits.resize(as_size(config.expert_count, "expert_count"));
+            scratch.moe_result.resize(hidden);
+            scratch.expert_output.resize(hidden);
+        }
         scratch.final_hidden.resize(hidden);
         scratch.embedding.resize(embedding_reader.row_bytes());
         scratch.rope_cosine.resize(rotary_dim / 2);
         scratch.rope_sine.resize(rotary_dim / 2);
 
         layers.reserve(index.layers().size());
+        if (config.mixture_of_experts) {
+            expert_loader = std::make_unique<ExpertIoLoader>(3);
+            const auto layer_count = index.layers().size();
+            if (layer_count > std::numeric_limits<std::size_t>::max() / 3U) {
+                throw std::invalid_argument("Qwen3.5 expert cache count overflows");
+            }
+            const auto per_store_budget = automatic_expert_cache_budget() / (layer_count * 3U);
+            routed_expert_stores.reserve(layer_count);
+            for (const auto& tensors : index.layers()) {
+                RoutedExpertStores stores;
+                const auto expert_count = as_size(config.expert_count, "expert_count");
+                stores.slices = {
+                    storage::split_expert_tensor(tensors.expert_gate, expert_count),
+                    storage::split_expert_tensor(tensors.expert_up, expert_count),
+                    storage::split_expert_tensor(tensors.expert_down, expert_count)};
+                stores.gate = std::make_unique<storage::ExpertStore>(file, stores.slices[0],
+                                                                     per_store_budget);
+                stores.up = std::make_unique<storage::ExpertStore>(file, stores.slices[1],
+                                                                   per_store_budget);
+                stores.down = std::make_unique<storage::ExpertStore>(file, stores.slices[2],
+                                                                     per_store_budget);
+                routed_expert_stores.push_back(std::move(stores));
+            }
+        }
         linear_states.resize(index.layers().size());
         attention_caches.resize(index.layers().size());
         for (std::size_t layer = 0; layer < index.layers().size(); ++layer) {
             const auto& tensors = index.layers()[layer];
-            layers.emplace_back(file, tensors);
+            layers.emplace_back(file, tensors, config.mixture_of_experts);
             if (tensors.full_attention) {
                 attention_caches[layer] = std::make_unique<KvCache>(context_capacity, kv_heads,
                     head_dim, value_dim, kv_precision, attention_heads);
@@ -281,6 +520,8 @@ public:
     TensorReader output_reader;
     std::vector<float> output_norm;
     std::vector<LayerReaders> layers;
+    std::vector<RoutedExpertStores> routed_expert_stores;
+    std::unique_ptr<ExpertIoLoader> expert_loader;
     std::vector<LinearState> linear_states;
     std::vector<std::unique_ptr<KvCache>> attention_caches;
     std::size_t model_context{};
@@ -317,7 +558,7 @@ public:
             const auto conv_kernel = as_size(config.ssm_conv_kernel, "ssm_conv_kernel");
             const float epsilon = static_cast<float>(config.rms_norm_epsilon);
             const float theta = static_cast<float>(config.rope_frequency_base);
-            prepare_rope(position, rotary_dim, theta, config.rope_dimension_sections,
+            prepare_rope(position, rotary_dim, config.rope_dimension_sections, theta,
                          scratch.rope_cosine, scratch.rope_sine);
 
             for (std::size_t layer = 0; layer < layers.size(); ++layer) {
@@ -412,15 +653,111 @@ public:
 
                 for (std::size_t i = 0; i < hidden_size; ++i) hidden[i] += scratch.mixer_output[i];
                 rms_norm(hidden, readers.post_attention_norm, normalized, epsilon);
-                tensor_linear(readers.feed_forward_gate, normalized, scratch.ffn_gate,
-                              0, &scratch.linear);
-                tensor_linear(readers.feed_forward_up, normalized, scratch.ffn_up,
-                              0, &scratch.linear);
-                for (std::size_t i = 0; i < scratch.ffn_activated.size(); ++i) {
-                    scratch.ffn_activated[i] = silu(scratch.ffn_gate[i]) * scratch.ffn_up[i];
+                if (!config.mixture_of_experts) {
+                    tensor_linear(*readers.feed_forward_gate, normalized, scratch.ffn_gate,
+                                  0, &scratch.linear);
+                    tensor_linear(*readers.feed_forward_up, normalized, scratch.ffn_up,
+                                  0, &scratch.linear);
+                    for (std::size_t i = 0; i < scratch.ffn_activated.size(); ++i) {
+                        scratch.ffn_activated[i] = silu(scratch.ffn_gate[i]) * scratch.ffn_up[i];
+                    }
+                    tensor_linear(*readers.feed_forward_down, scratch.ffn_activated,
+                                  scratch.mixer_output, 0, &scratch.linear);
+                } else {
+                    const auto expert_width = as_size(config.expert_feed_forward_length,
+                                                      "expert_feed_forward_length");
+                    const auto shared_width = as_size(config.shared_expert_feed_forward_length,
+                                                      "shared_expert_feed_forward_length");
+                    const auto top_k = as_size(config.experts_per_token, "experts_per_token");
+
+                    // Strata-inspired routing lookahead warms only OS file pages.
+                    // The exact next-layer router result below remains authoritative.
+                    if (layer + 1 < layers.size()) {
+                        tensor_linear(*layers[layer + 1].router, normalized,
+                                      scratch.router_logits, 0, &scratch.linear);
+                        const auto predicted = select_experts(scratch.router_logits, top_k, false);
+                        auto& future = routed_expert_stores[layer + 1];
+                        for (const auto& route : predicted) {
+                            future.gate->prefetch(route.id);
+                            future.up->prefetch(route.id);
+                            future.down->prefetch(route.id);
+                        }
+                    }
+
+                    tensor_linear(*readers.router, normalized, scratch.router_logits,
+                                  0, &scratch.linear);
+                    const auto routes = select_experts(scratch.router_logits, top_k,
+                                                        config.expert_weights_norm);
+                    std::fill(scratch.moe_result.begin(), scratch.moe_result.end(), 0.0F);
+                    auto& expert_stores = routed_expert_stores[layer];
+                    const auto load_expert = [this, layer](std::size_t expert_id) {
+                        return PendingExpertWeights{
+                            expert_loader->submit([this, layer, expert_id] {
+                                return routed_expert_stores[layer].gate->get(expert_id);
+                            }),
+                            expert_loader->submit([this, layer, expert_id] {
+                                return routed_expert_stores[layer].up->get(expert_id);
+                            }),
+                            expert_loader->submit([this, layer, expert_id] {
+                                return routed_expert_stores[layer].down->get(expert_id);
+                            })};
+                    };
+                    auto pending = load_expert(routes.front().id);
+                    const float expert_scale = static_cast<float>(config.expert_weights_scale);
+                    for (std::size_t route_index = 0; route_index < routes.size(); ++route_index) {
+                        const auto& route = routes[route_index];
+                        auto gate_bytes = pending.gate.get();
+                        auto up_bytes = pending.up.get();
+                        auto down_bytes = pending.down.get();
+                        if (route_index + 1 < routes.size()) {
+                            pending = load_expert(routes[route_index + 1].id);
+                        }
+                        TensorReader gate_reader(
+                            expert_view(index.layers()[layer].expert_gate,
+                                        expert_stores.slices[0][route.id]), gate_bytes);
+                        TensorReader up_reader(
+                            expert_view(index.layers()[layer].expert_up,
+                                        expert_stores.slices[1][route.id]), up_bytes);
+                        TensorReader down_reader(
+                            expert_view(index.layers()[layer].expert_down,
+                                        expert_stores.slices[2][route.id]), down_bytes);
+                        auto gate = std::span<float>(scratch.ffn_gate).first(expert_width);
+                        auto up = std::span<float>(scratch.ffn_up).first(expert_width);
+                        auto activated = std::span<float>(scratch.ffn_activated).first(expert_width);
+                        tensor_linear(gate_reader, normalized, gate, 0, &scratch.linear);
+                        tensor_linear(up_reader, normalized, up, 0, &scratch.linear);
+                        for (std::size_t i = 0; i < expert_width; ++i) {
+                            activated[i] = silu(gate[i]) * up[i];
+                        }
+                        tensor_linear(down_reader, activated, scratch.expert_output,
+                                      0, &scratch.linear);
+                        const float route_scale = route.weight * expert_scale;
+                        for (std::size_t i = 0; i < hidden_size; ++i) {
+                            scratch.moe_result[i] += route_scale * scratch.expert_output[i];
+                        }
+                    }
+
+                    float shared_gate_value = 0.0F;
+                    tensor_linear(*readers.shared_expert_router, normalized,
+                                  std::span<float>(&shared_gate_value, 1), 0, &scratch.linear);
+                    tensor_linear(*readers.shared_expert_gate, normalized,
+                                  std::span<float>(scratch.ffn_gate).first(shared_width),
+                                  0, &scratch.linear);
+                    tensor_linear(*readers.shared_expert_up, normalized,
+                                  std::span<float>(scratch.ffn_up).first(shared_width),
+                                  0, &scratch.linear);
+                    for (std::size_t i = 0; i < shared_width; ++i) {
+                        scratch.ffn_activated[i] = silu(scratch.ffn_gate[i]) * scratch.ffn_up[i];
+                    }
+                    tensor_linear(*readers.shared_expert_down,
+                                  std::span<const float>(scratch.ffn_activated).first(shared_width),
+                                  scratch.expert_output, 0, &scratch.linear);
+                    const float shared_scale = sigmoid(shared_gate_value);
+                    for (std::size_t i = 0; i < hidden_size; ++i) {
+                        scratch.mixer_output[i] = scratch.moe_result[i] +
+                            shared_scale * scratch.expert_output[i];
+                    }
                 }
-                tensor_linear(readers.feed_forward_down, scratch.ffn_activated,
-                              scratch.mixer_output, 0, &scratch.linear);
                 for (std::size_t i = 0; i < hidden_size; ++i) hidden[i] += scratch.mixer_output[i];
             }
 
@@ -457,6 +794,25 @@ public:
             bytes += (state.convolution.size() + state.recurrent.size()) * sizeof(float);
         }
         return bytes;
+    }
+
+    Qwen35ExpertCacheStats expert_cache_stats() const {
+        Qwen35ExpertCacheStats stats;
+        const auto add = [&stats](const storage::ExpertStore& store) {
+            stats.capacity_bytes += store.cache_capacity_bytes();
+            stats.resident_bytes += store.cache_bytes();
+            stats.bytes_read += store.bytes_read_from_disk();
+            stats.read_operations += store.read_operations();
+            stats.read_time_ns += store.read_time_ns();
+            stats.hits += store.cache_hits();
+            stats.misses += store.cache_misses();
+        };
+        for (const auto& stores : routed_expert_stores) {
+            add(*stores.gate);
+            add(*stores.up);
+            add(*stores.down);
+        }
+        return stats;
     }
 };
 
@@ -509,7 +865,13 @@ std::vector<std::uint32_t> Qwen35Runner::generate_tokens(
         if (best == logits.end()) throw std::runtime_error("Qwen3.5 produced no vocabulary logits");
         const auto token = static_cast<std::uint32_t>(best - logits.begin());
         generated.push_back(token);
-        if (stats) stats->generated_tokens = generated.size();
+        if (stats) {
+            stats->generated_tokens = generated.size();
+            if (i == 0) {
+                stats->first_generated_token_id = token;
+                stats->has_generated_token = true;
+            }
+        }
         if (token == impl_->tokenizer.eos_token_id() || i + 1 == max_new_tokens) break;
         impl_->forward_into(token, prompt.size() + i, true, &logits);
     }
@@ -555,6 +917,9 @@ std::size_t Qwen35Runner::recurrent_state_storage_bytes() const noexcept {
 }
 std::uint64_t Qwen35Runner::bytes_read_from_disk() const noexcept {
     return impl_ ? impl_->file->bytes_read() : 0;
+}
+Qwen35ExpertCacheStats Qwen35Runner::expert_cache_stats() const {
+    return impl_ ? impl_->expert_cache_stats() : Qwen35ExpertCacheStats{};
 }
 
 }  // namespace pokitlms::model

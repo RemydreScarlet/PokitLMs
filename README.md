@@ -1,6 +1,6 @@
 # PokitLMs
 
-PokitLMs is a native, mobile-first LLM inference backend and Android app in C++20/Kotlin. The runtime is implemented in this repository; it does not embed or fetch llama.cpp. The first Android app supports the currently implemented Qwen3-MoE and Qwen3.5 GGUF runners.
+PokitLMs is a native, mobile-first LLM inference backend and Android app in C++20/Kotlin. The runtime is implemented in this repository; it does not embed or fetch llama.cpp. The Android app supports Qwen3-MoE, dense Qwen3.5, and Qwen3.5-MoE GGUF runners.
 
 ## Direction
 
@@ -25,13 +25,15 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Automatically sizes matrix row reads around a 256 KiB temporary weight window to reduce small storage reads.
 - AArch64 NEON dot-product and weighted-accumulation paths for dense F32, quantized blocks, and grouped-query attention; scalar fallback remains portable.
 - Single-token Qwen3-MoE decode path with per-layer GQA KV state, Q/K RMSNorm, RoPE, top-k routing, and cached on-demand expert execution.
+- Qwen3.5-MoE support for hybrid Gated DeltaNet/full-attention layers, softmax top-k routing with normalized selected weights, routed experts, and a sigmoid-gated shared expert.
+- Qwen3.5-MoE expert weights use a bounded LRU cache sized from available system memory. The next layer's router is also evaluated as an I/O hint to warm predicted expert pages; only the exact current-layer route contributes to inference.
 - Tokenizer-backed multi-token generation with greedy or temperature sampling, top-k/top-p filtering, repetition penalty, and EOS stopping.
 - Prompt prefill skips vocabulary logits for all but the final prompt token, avoiding repeated output-matrix reads.
 - GGUF v3 metadata/tensor-directory reader with known-format payload extent validation; payloads remain file-backed.
 - Expert tensor splitting by the GGUF last dimension, ready to feed routed slices into the bounded store.
 - Validated GGUF architecture parameters and tensor index for Qwen3-MoE (`qwen3moe`); the token executor is still awaiting comparison with a reference model.
-- Qwen3.5 GGUF tensor index and greedy text generation for dense Qwen3.5 models; prompt prefill skips vocabulary projection until its final token, recurrent convolution/DeltaNet state and bounded full-attention KV state are held and reported separately, and matrix weights stay file-backed.
-- `pokitlms-qwen35-bench MODEL.gguf USER_MESSAGE [new_tokens] [kv_window] [kv_precision]` runs a Qwen3.5 chat prompt and reports prefill/decode throughput plus attention and recurrent state memory.
+- Qwen3.5 GGUF tensor index and greedy text generation for dense and MoE Qwen3.5 models; prompt prefill skips vocabulary projection until its final token, recurrent convolution/DeltaNet state and bounded full-attention KV state are held and reported separately, and matrix weights stay file-backed.
+- `pokitlms-qwen35-bench MODEL.gguf USER_MESSAGE [new_tokens] [kv_window] [kv_precision]` reports prefill/decode throughput, attention and recurrent state memory, and (for MoE) expert-cache capacity and hit counts.
 - Tied-output Qwen3-MoE GGUF support: when `output.weight` is absent, the runner reuses `token_embd.weight` for vocabulary projection.
 - Qwen3-MoE tensor-name/shape index for the model's base, attention, router, and expert tensors.
 - Qwen GPT-2 byte-level BPE encoder/decoder using GGUF vocabulary, merge, token-type, and special-token metadata.
@@ -48,7 +50,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - C ABI opaque Qwen3-MoE handle for creation, serialized text generation, and cache/storage telemetry.
 - Qwen3 chat helpers for single messages and multi-turn system/user/assistant history in the C++ and C APIs.
 - Multi-turn chat keeps KV state and reuses token-identical history prefixes; generated assistant token IDs are retained so replies are not re-tokenized between turns.
-- Both model runners have deterministic tiny-GGUF generation smoke tests; the Qwen3.5 fixture includes recurrent and full-attention layers. A real Qwen3.5 0.8B Q4_0 model was loaded and generated on a Pixel 9a (Android 16) through JNI; its first greedy token matched llama.cpp, while later tokens diverged after a close-logit tie. Full-logit parity, stable multi-token reference parity, Qwen3-MoE reference comparison, broader quantized format coverage, and optimized ARM kernels remain incomplete.
+- Dense Qwen3.5, Qwen3.5-MoE, and Qwen3-MoE have deterministic tiny-GGUF generation smoke tests. A real Qwen3.5 0.8B Q4_0 model was loaded and generated on a Pixel 9a (Android 16) through JNI; its first greedy token matched llama.cpp, while later tokens diverged after a close-logit tie. Full-logit parity, real 9B/35B reference comparisons, Qwen3-MoE reference comparison, broader quantized format coverage, and optimized ARM kernels remain incomplete.
 
 ## Build
 
@@ -65,6 +67,7 @@ be regenerated with:
 
 ```bash
 python3 tools/generate_qwen35_smoke_model.py tests/data/qwen35-smoke.gguf
+python3 tools/generate_qwen35_smoke_model.py --architecture qwen35moe tests/data/qwen35moe-smoke.gguf
 python3 tools/generate_qwen35_smoke_model.py --architecture qwen3moe tests/data/qwen3moe-smoke.gguf
 ```
 

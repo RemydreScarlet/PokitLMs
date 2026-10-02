@@ -19,7 +19,8 @@ struct Engine {
             throw std::runtime_error("GGUF has no valid general.architecture metadata");
         const auto& architecture = std::get<std::string>(it->second.value);
         if (architecture == "qwen3moe") moe = std::make_unique<pokitlms::model::Qwen3MoeRunner>(path);
-        else if (architecture == "qwen35") dense = std::make_unique<pokitlms::model::Qwen35Runner>(path);
+        else if (architecture == "qwen35" || architecture == "qwen35moe")
+            dense = std::make_unique<pokitlms::model::Qwen35Runner>(path);
         else throw std::runtime_error("Unsupported GGUF architecture: " + architecture);
     }
     std::unique_ptr<pokitlms::model::Qwen3MoeRunner> moe;

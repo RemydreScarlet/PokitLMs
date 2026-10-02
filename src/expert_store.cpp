@@ -140,6 +140,12 @@ std::shared_ptr<const std::vector<std::byte>> ExpertStore::get(std::size_t exper
     }
 }
 
+void ExpertStore::prefetch(std::size_t expert_id) const noexcept {
+    if (!impl_ || expert_id >= impl_->experts.size()) return;
+    const auto& slice = impl_->experts[expert_id];
+    impl_->file->prefetch(slice.offset, slice.size);
+}
+
 std::size_t ExpertStore::cache_capacity_bytes() const {
     return impl_ ? impl_->capacity_bytes : 0;
 }

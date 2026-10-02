@@ -54,6 +54,15 @@ double require_number(const GgufReader& model, const std::string& key) {
     throw std::runtime_error("GGUF metadata has wrong numeric type: " + key);
 }
 
+double optional_number(const GgufReader& model, const std::string& key, double fallback) {
+    const auto found = model.metadata().find(key);
+    if (found == model.metadata().end()) return fallback;
+    if (const auto* number = std::get_if<double>(&found->second.value)) return *number;
+    if (const auto* number = std::get_if<std::uint64_t>(&found->second.value)) return static_cast<double>(*number);
+    if (const auto* number = std::get_if<std::int64_t>(&found->second.value)) return static_cast<double>(*number);
+    throw std::runtime_error("GGUF metadata has wrong numeric type: " + key);
+}
+
 bool optional_bool(const GgufReader& model, const std::string& key, bool fallback) {
     const auto found = model.metadata().find(key);
     if (found == model.metadata().end()) return fallback;
@@ -99,17 +108,35 @@ Qwen35Config load_config(const GgufReader& model) {
     const auto arch = model.metadata().find("general.architecture");
     if (arch == model.metadata().end()) throw std::runtime_error("missing GGUF general.architecture");
     const auto* name = std::get_if<std::string>(&arch->second.value);
-    if (!name || *name != "qwen35") throw std::runtime_error("GGUF is not a Qwen3.5 text model");
+    if (!name || (*name != "qwen35" && *name != "qwen35moe")) {
+        throw std::runtime_error("GGUF is not a supported Qwen3.5 text model");
+    }
 
-    constexpr std::string_view prefix = "qwen35.";
-    const auto key = [prefix](std::string_view suffix) {
-        return std::string(prefix) + std::string(suffix);
+    const std::string prefix = *name + ".";
+    const auto key = [&prefix](std::string_view suffix) {
+        return prefix + std::string(suffix);
     };
     Qwen35Config config;
+    config.mixture_of_experts = *name == "qwen35moe";
     config.context_length = require_u64(model, key("context_length"));
     config.embedding_length = require_u64(model, key("embedding_length"));
     config.total_block_count = require_u64(model, key("block_count"));
-    config.feed_forward_length = require_u64(model, key("feed_forward_length"));
+    config.feed_forward_length = config.mixture_of_experts
+        ? optional_u64(model, key("feed_forward_length"), 0)
+        : require_u64(model, key("feed_forward_length"));
+    if (config.mixture_of_experts) {
+        config.expert_count = require_u64(model, key("expert_count"));
+        config.experts_per_token = require_u64(model, key("expert_used_count"));
+        config.expert_feed_forward_length = optional_u64(
+            model, key("expert_feed_forward_length"), config.feed_forward_length);
+        config.shared_expert_feed_forward_length = optional_u64(
+            model, key("expert_shared_feed_forward_length"), config.feed_forward_length);
+        config.expert_weights_norm = optional_bool(model, key("expert_weights_norm"), true);
+        config.expert_weights_scale = optional_number(model, key("expert_weights_scale"), 1.0);
+        if (config.feed_forward_length == 0) {
+            config.feed_forward_length = config.expert_feed_forward_length;
+        }
+    }
     config.attention_heads = require_u64(model, key("attention.head_count"));
     config.key_value_heads = require_u64(model, key("attention.head_count_kv"));
     config.attention_head_length = require_u64(model, key("attention.key_length"));
@@ -145,6 +172,35 @@ Qwen35Config load_config(const GgufReader& model) {
     require_positive(config.ssm_time_step_rank, "ssm.time_step_rank");
     require_positive(config.ssm_inner_size, "ssm.inner_size");
     require_positive(config.full_attention_interval, "full_attention_interval");
+    if (config.mixture_of_experts) {
+        require_positive(config.expert_count, "expert_count");
+        require_positive(config.experts_per_token, "expert_used_count");
+        require_positive(config.expert_feed_forward_length, "expert_feed_forward_length");
+        require_positive(config.shared_expert_feed_forward_length,
+                         "expert_shared_feed_forward_length");
+        if (config.experts_per_token > config.expert_count ||
+            !std::isfinite(config.expert_weights_scale) || config.expert_weights_scale < 0.0) {
+            throw std::runtime_error("inconsistent Qwen3.5 MoE parameters");
+        }
+    }
+
+    const auto recurrent = model.metadata().find(key("attention.recurrent_layers"));
+    if (recurrent != model.metadata().end()) {
+        const auto* values = std::get_if<MetadataValue::Array>(&recurrent->second.value);
+        if (!values || values->size() != config.total_block_count) {
+            throw std::runtime_error("Qwen3.5 recurrent layer metadata has the wrong shape");
+        }
+        config.recurrent_layers.reserve(values->size());
+        for (const auto& value : *values) {
+            std::uint64_t recurrent_flag = 0;
+            if (const auto* flag = std::get_if<bool>(&value.value)) recurrent_flag = *flag;
+            else recurrent_flag = as_u64(value, "attention.recurrent_layers");
+            if (recurrent_flag > 1) {
+                throw std::runtime_error("Qwen3.5 recurrent layer metadata contains a non-boolean value");
+            }
+            config.recurrent_layers.push_back(static_cast<std::uint8_t>(recurrent_flag));
+        }
+    }
     std::uint64_t rope_section_count = 0;
     for (const auto section : config.rope_dimension_sections) {
         if (section > std::numeric_limits<std::uint64_t>::max() - rope_section_count) {
@@ -175,6 +231,7 @@ Qwen35Config load_config(const GgufReader& model) {
 }  // namespace
 
 bool Qwen35Config::is_full_attention_layer(std::uint64_t layer) const noexcept {
+    if (layer < recurrent_layers.size()) return recurrent_layers[layer] == 0;
     return full_attention_interval != 0 && (layer + 1) % full_attention_interval == 0;
 }
 
@@ -245,9 +302,30 @@ Qwen35Index::Qwen35Index(const GgufReader& model)
         tensors.full_attention = config_.is_full_attention_layer(layer);
         tensors.attention_norm = require_tensor(model, prefix + "attn_norm.weight", {hidden});
         tensors.post_attention_norm = require_tensor(model, prefix + "post_attention_norm.weight", {hidden});
-        tensors.feed_forward_gate = require_tensor(model, prefix + "ffn_gate.weight", {hidden, ffn});
-        tensors.feed_forward_up = require_tensor(model, prefix + "ffn_up.weight", {hidden, ffn});
-        tensors.feed_forward_down = require_tensor(model, prefix + "ffn_down.weight", {ffn, hidden});
+        if (config_.mixture_of_experts) {
+            const auto expert_ffn = config_.expert_feed_forward_length;
+            const auto shared_ffn = config_.shared_expert_feed_forward_length;
+            tensors.router = require_tensor(model, prefix + "ffn_gate_inp.weight",
+                                             {hidden, config_.expert_count});
+            tensors.expert_gate = require_tensor(model, prefix + "ffn_gate_exps.weight",
+                {hidden, expert_ffn, config_.expert_count});
+            tensors.expert_up = require_tensor(model, prefix + "ffn_up_exps.weight",
+                {hidden, expert_ffn, config_.expert_count});
+            tensors.expert_down = require_tensor(model, prefix + "ffn_down_exps.weight",
+                {expert_ffn, hidden, config_.expert_count});
+            tensors.shared_expert_router = require_tensor(model, prefix + "ffn_gate_inp_shexp.weight",
+                                                           {hidden});
+            tensors.shared_expert_gate = require_tensor(model, prefix + "ffn_gate_shexp.weight",
+                                                         {hidden, shared_ffn});
+            tensors.shared_expert_up = require_tensor(model, prefix + "ffn_up_shexp.weight",
+                                                       {hidden, shared_ffn});
+            tensors.shared_expert_down = require_tensor(model, prefix + "ffn_down_shexp.weight",
+                                                         {shared_ffn, hidden});
+        } else {
+            tensors.feed_forward_gate = require_tensor(model, prefix + "ffn_gate.weight", {hidden, ffn});
+            tensors.feed_forward_up = require_tensor(model, prefix + "ffn_up.weight", {hidden, ffn});
+            tensors.feed_forward_down = require_tensor(model, prefix + "ffn_down.weight", {ffn, hidden});
+        }
         if (tensors.full_attention) {
             tensors.query = require_tensor(model, prefix + "attn_q.weight",
                                             {hidden, query_tensor_dimension});

@@ -27,8 +27,16 @@ struct Qwen35Config {
     std::uint64_t ssm_inner_size{};
     std::uint64_t full_attention_interval{};
     std::uint64_t nextn_predict_layers{};
+    std::uint64_t expert_count{};
+    std::uint64_t experts_per_token{};
+    std::uint64_t expert_feed_forward_length{};
+    std::uint64_t shared_expert_feed_forward_length{};
     double rms_norm_epsilon{};
     double rope_frequency_base{};
+    double expert_weights_scale{1.0};
+    std::vector<std::uint8_t> recurrent_layers;
+    bool mixture_of_experts{};
+    bool expert_weights_norm{true};
     bool tie_word_embeddings{};
 
     [[nodiscard]] bool is_full_attention_layer(std::uint64_t layer) const noexcept;
@@ -46,6 +54,14 @@ struct Qwen35LayerTensors {
     TensorInfo feed_forward_gate;
     TensorInfo feed_forward_up;
     TensorInfo feed_forward_down;
+    TensorInfo router;
+    TensorInfo expert_gate;
+    TensorInfo expert_up;
+    TensorInfo expert_down;
+    TensorInfo shared_expert_router;
+    TensorInfo shared_expert_gate;
+    TensorInfo shared_expert_up;
+    TensorInfo shared_expert_down;
 
     TensorInfo query;
     TensorInfo key;

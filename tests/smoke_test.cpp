@@ -134,6 +134,25 @@ void test_gated_delta_state_layout() {
     assert(nearly_equal(state[3], 0.0F));
 }
 
+void test_gated_delta_grouped_head_repeat_order() {
+    const float query[] = {1.0F, -1.0F};
+    const float key[] = {1.0F, 1.0F};
+    const float value[] = {0.0F, 0.0F, 0.0F, 0.0F};
+    const float log_decay[] = {0.0F, 0.0F, 0.0F, 0.0F};
+    const float beta[] = {0.0F, 0.0F, 0.0F, 0.0F};
+    float state[] = {1.0F, 1.0F, 1.0F, 1.0F};
+    float output[4] = {};
+    pokitlms::GatedDeltaNetScratch scratch;
+
+    pokitlms::gated_delta_recurrent_step_grouped(query, key, value, log_decay, beta,
+        2, 4, 1, 1, state, output, scratch);
+
+    assert(output[0] > 0.99F);
+    assert(output[1] < -0.99F);
+    assert(output[2] > 0.99F);
+    assert(output[3] < -0.99F);
+}
+
 }  // namespace
 
 int main() {
@@ -144,5 +163,6 @@ int main() {
     test_kv_cache();
     test_attention_decode();
     test_gated_delta_state_layout();
+    test_gated_delta_grouped_head_repeat_order();
     return 0;
 }

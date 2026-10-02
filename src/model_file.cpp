@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/types.h>
 #endif
 
 namespace pokitlms::storage {
@@ -129,6 +130,15 @@ void ModelFile::read_into_uncached(std::uint64_t offset,
                                    std::span<std::byte> destination) const {
     if (!impl_) throw std::logic_error("model file is unavailable");
     impl_->read_into(offset, destination, true);
+}
+void ModelFile::prefetch(std::uint64_t offset, std::size_t size) const noexcept {
+    if (!impl_ || size == 0 || offset > impl_->file_size || size > impl_->file_size - offset) return;
+#if !defined(_WIN32) && defined(POSIX_FADV_WILLNEED)
+    if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()) ||
+        size > static_cast<std::size_t>(std::numeric_limits<off_t>::max())) return;
+    (void)::posix_fadvise(impl_->fd, static_cast<off_t>(offset),
+                          static_cast<off_t>(size), POSIX_FADV_WILLNEED);
+#endif
 }
 std::vector<std::byte> ModelFile::read(std::uint64_t offset, std::size_t size) const {
     std::vector<std::byte> result(size);

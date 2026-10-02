@@ -53,7 +53,6 @@ void gated_delta_recurrent_step_grouped(
     scratch.delta.resize(value_count);
 
     constexpr float norm_epsilon = 1.0e-6F;
-    const auto key_head_repeat = value_heads / key_heads;
     const float query_scale = 1.0F / std::sqrt(static_cast<float>(key_dimension));
     for (std::size_t head = 0; head < key_heads; ++head) {
         const auto q_offset = head * key_dimension;
@@ -74,7 +73,10 @@ void gated_delta_recurrent_step_grouped(
     }
 
     for (std::size_t head = 0; head < value_heads; ++head) {
-        const auto key_head = head / key_head_repeat;
+        // ggml_repeat_4d repeats the compact Q/K head axis as a whole, so
+        // value heads map to key heads modulo key_heads (for example,
+        // [q0..q7] -> [q0..q7, q0..q7]), not in contiguous groups.
+        const auto key_head = head % key_heads;
         const auto q_offset = key_head * key_dimension;
         const auto value_offset = head * value_dimension;
         const auto state_offset = head * state_head_size;

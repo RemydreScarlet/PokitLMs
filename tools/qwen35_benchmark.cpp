@@ -61,9 +61,12 @@ int main(int argc, char** argv) {
         pokitlms::model::Qwen35GenerationStats stats;
         const auto bytes_before = runner.bytes_read_from_disk();
         const auto response = runner.generate_chat(argv[2], max_new_tokens, &stats);
+        const auto expert_cache = runner.expert_cache_stats();
         std::cout << response << '\n';
         std::cerr << "model_load_ms=" << milliseconds(load_ns) << '\n'
                   << "generated_tokens=" << stats.generated_tokens << '\n'
+                  << "first_generated_token_id="
+                  << (stats.has_generated_token ? stats.first_generated_token_id : 0) << '\n'
                   << "prompt_tokens=" << stats.prompt_tokens << '\n'
                   << "prefill_ms=" << milliseconds(stats.prefill_time_ns) << '\n'
                   << "decode_ms=" << milliseconds(stats.decode_time_ns) << '\n'
@@ -74,7 +77,12 @@ int main(int argc, char** argv) {
                   << "model_bytes_read=" << runner.bytes_read_from_disk() - bytes_before << '\n'
                   << "kv_cache_storage_bytes=" << runner.kv_cache_storage_bytes() << '\n'
                   << "recurrent_state_storage_bytes="
-                  << runner.recurrent_state_storage_bytes() << '\n';
+                  << runner.recurrent_state_storage_bytes() << '\n'
+                  << "expert_cache_capacity_bytes=" << expert_cache.capacity_bytes << '\n'
+                  << "expert_cache_resident_bytes=" << expert_cache.resident_bytes << '\n'
+                  << "expert_cache_bytes_read=" << expert_cache.bytes_read << '\n'
+                  << "expert_cache_hits=" << expert_cache.hits << '\n'
+                  << "expert_cache_misses=" << expert_cache.misses << '\n';
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "qwen35-bench: " << error.what() << '\n';

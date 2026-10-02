@@ -34,7 +34,7 @@ class AndroidInferenceSmokeTest {
     fun loadsBothGgufRunnersThroughJniAndGeneratesOnDevice() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val bridge = NativeModelBridge()
-        for (filename in listOf("qwen35-smoke.gguf", "qwen3moe-smoke.gguf")) {
+        for (filename in listOf("qwen35-smoke.gguf", "qwen35moe-smoke.gguf", "qwen3moe-smoke.gguf")) {
             val model = File(instrumentation.targetContext.cacheDir, filename)
             instrumentation.context.assets.open(filename).use { input ->
                 model.outputStream().use { output -> input.copyTo(output) }

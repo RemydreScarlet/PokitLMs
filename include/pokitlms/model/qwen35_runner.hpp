@@ -19,6 +19,18 @@ struct Qwen35GenerationStats {
     std::uint64_t decode_time_ns{};
     std::size_t prompt_tokens{};
     std::size_t generated_tokens{};
+    std::uint32_t first_generated_token_id{};
+    bool has_generated_token{};
+};
+
+struct Qwen35ExpertCacheStats {
+    std::size_t capacity_bytes{};
+    std::size_t resident_bytes{};
+    std::uint64_t bytes_read{};
+    std::uint64_t read_operations{};
+    std::uint64_t read_time_ns{};
+    std::uint64_t hits{};
+    std::uint64_t misses{};
 };
 
 // Single-sequence Qwen3.5 text decoder. Matrix weights stay file-backed;
@@ -52,6 +64,7 @@ public:
     [[nodiscard]] std::size_t kv_cache_storage_bytes() const noexcept;
     [[nodiscard]] std::size_t recurrent_state_storage_bytes() const noexcept;
     [[nodiscard]] std::uint64_t bytes_read_from_disk() const noexcept;
+    [[nodiscard]] Qwen35ExpertCacheStats expert_cache_stats() const;
 
 private:
     class Impl;

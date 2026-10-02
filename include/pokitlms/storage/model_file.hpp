@@ -25,6 +25,9 @@ public:
     // corresponding file-cache pages. The advice is best-effort and falls back
     // to a regular read on platforms without a page-cache discard API.
     void read_into_uncached(std::uint64_t offset, std::span<std::byte> destination) const;
+    // Hint that a future read is likely. This does not alter returned weight
+    // values and is a no-op on platforms without positioned-read advice.
+    void prefetch(std::uint64_t offset, std::size_t size) const noexcept;
     [[nodiscard]] std::vector<std::byte> read(std::uint64_t offset, std::size_t size) const;
 
 private:

@@ -37,6 +37,7 @@ public:
     ExpertStore& operator=(ExpertStore&&) noexcept;
 
     [[nodiscard]] std::shared_ptr<const std::vector<std::byte>> get(std::size_t expert_id);
+    void prefetch(std::size_t expert_id) const noexcept;
     [[nodiscard]] std::size_t cache_capacity_bytes() const;
     [[nodiscard]] std::size_t cache_bytes() const;
     [[nodiscard]] std::uint64_t bytes_read_from_disk() const;
