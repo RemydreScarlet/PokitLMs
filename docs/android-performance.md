@@ -523,6 +523,41 @@ so its Q6_K cost must be profiled separately without inferring it from the
 whole-file format histogram. The captured run is
 `$HOME/.local/share/pokitlms-tools/logs/qwen35-9b-quant-profile-hi32-20261003.log`.
 
+### Q6_K lane-32 specialization on Qwen3.5-2B and 9B
+
+The subgroup shader uses 32 lanes on the RTX 2070 SUPER. A candidate path
+specialized `stride == 32` by processing `i = lane` directly, while retaining
+the original loop for other strides and preserving the FP32 operation order.
+The Vulkan matrix tests passed, including the dense and MoE token parity
+checks. Four 2B runs alternated the baseline and candidate with the same
+`Reply with exactly the word OK.` prompt, 8-token limit, 4 MiB window, and
+whole-model cache:
+
+| Path | Decode tokens/s, two runs | Mean | Q6_K GPU time, mean |
+| --- | ---: | ---: | ---: |
+| Baseline | 14.38, 14.83 | 14.61 | 127.8 ms |
+| Lane-32 candidate | 15.19, 15.40 | 15.29 | 118.8 ms |
+
+The candidate increased 2B decode throughput by 4.7% and reduced accumulated
+Q6_K GPU time by 7.0%. Every run returned the same six token IDs:
+`248068,271,248069,271,3793,248046`.
+
+The 9B `hi` test completed the same 14-token response in every run. Across two
+baseline runs, decode averaged 8.10 tokens/s; across three candidate runs, it
+averaged 7.97 tokens/s, so the noisy end-to-end measurements do not establish
+a 9B throughput gain. The accumulated Q6_K shader time did fall from a
+360.7 ms baseline mean to a 320.7 ms candidate mean (11.1%); these shader
+totals cover prompt prefill and decode, not decode wall time. The candidate
+stays because the 2B end-to-end result improved in both alternating runs and
+the Q6_K shader work consistently fell; the 9B result is recorded as
+inconclusive for total decode speed.
+
+All runs used the host RTX 2070 SUPER and the resident Vulkan model cache; no
+35B generation or Android inference was performed. Each process read the
+model during initial cache fill, then generated from the resident GPU copy.
+Captures are
+`$HOME/.local/share/pokitlms-tools/logs/qwen35-{2b,9b}-q6-lane32-*-20261003.log`.
+
 ### Workgroup-size A/B on Qwen3.5-9B
 
 Isolated builds changed the Vulkan workgroup from 128 threads to 64 or 256,
