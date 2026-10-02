@@ -50,7 +50,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - C ABI opaque Qwen3-MoE handle for creation, serialized text generation, and cache/storage telemetry.
 - Qwen3 chat helpers for single messages and multi-turn system/user/assistant history in the C++ and C APIs.
 - Multi-turn chat keeps KV state and reuses token-identical history prefixes; generated assistant token IDs are retained so replies are not re-tokenized between turns.
-- Dense Qwen3.5, Qwen3.5-MoE, and Qwen3-MoE have deterministic tiny-GGUF generation smoke tests. A real Qwen3.5 0.8B Q4_0 model was loaded and generated on a Pixel 9a (Android 16) through JNI; its first greedy token matched llama.cpp, while later tokens diverged after a close-logit tie. Full-logit parity, real 9B/35B reference comparisons, Qwen3-MoE reference comparison, broader quantized format coverage, and optimized ARM kernels remain incomplete.
+- Dense Qwen3.5, Qwen3.5-MoE, and Qwen3-MoE have deterministic tiny-GGUF generation smoke tests. A real Qwen3.5 0.8B Q4_0 model was loaded and generated on a Pixel 9a (Android 16) through JNI; its first greedy token matched llama.cpp, while later tokens diverged after a close-logit tie. On one real-model prompt (`hi`), PokitLMs matched the first four greedy tokens from llama.cpp for Qwen3.5 9B Q4_K_M (CPU reference and CUDA with FlashAttention disabled) and 35B-A3B Q4_K_M (dual-GPU reference with automatic memory fitting). The 9B CUDA reference with FlashAttention enabled diverged after the first token. These are single-prompt prefix checks; full-logit and longer-generation parity, Qwen3-MoE reference comparison, broader quantized format coverage, and optimized ARM kernels remain incomplete.
 
 ## Build
 
