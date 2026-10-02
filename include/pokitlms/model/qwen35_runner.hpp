@@ -54,8 +54,9 @@ struct Qwen35ExpertCacheStats {
     std::uint64_t misses{};
 };
 
-// Single-sequence Qwen3.5 text decoder. Matrix weights stay file-backed;
-// recurrent, convolution, and bounded full-attention state stay resident.
+// Single-sequence Qwen3.5 text decoder. Matrix weights are read from GGUF or
+// cached in Vulkan device-local memory when the GPU budget permits; recurrent,
+// convolution, and bounded full-attention state stay resident.
 class Qwen35Runner {
 public:
     explicit Qwen35Runner(std::filesystem::path model_path,

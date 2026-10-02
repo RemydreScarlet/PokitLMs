@@ -459,6 +459,12 @@ reduction modes, and tiny dense/MoE generation checks passed on the GTX1080
 and Mali-G715. These exercises support kernel correctness under their tested
 shapes and values, rather than full-model accuracy.
 
+The host `pokitlms_vulkan_tests` now compares CPU and Vulkan text on both tiny
+dense and MoE GGUF fixtures for `hi`, `hello`, and `again`, with model caching
+automatic and disabled. The current GTX1080 run exercised the automatic cache
+(17,792 bytes uploaded) and the streaming path (zero bytes uploaded). The full
+host CTest suite passed all six tests.
+
 The real 9B tensor probe compared eight-row slices from the start, middle,
 and end of 282 matrices: 846 slice comparisons, using a deterministic input.
 Maximum absolute GPU/CPU error was:
