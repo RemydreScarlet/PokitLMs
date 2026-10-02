@@ -571,6 +571,19 @@ was opened and no Android inference was run. Build, instrumentation, and
 logcat captures are in
 `$HOME/.local/share/pokitlms-tools/logs/android-q6-lane32-*-20261003.log`.
 
+A follow-up tested unrolling the generic Q6_K lane loop for subgroup size 16.
+The diagnostic used a synthetic 2,048-by-512 Q6_K matrix and did not load a
+model. CPU/GPU parity passed with maximum absolute error `2.44e-4`. Single
+32-call observations across the baseline and candidate APKs ranged from 271
+to 365 microseconds per call, with no repeatable candidate advantage. A
+six-batch baseline run fell from 238 to 177 microseconds per call as the GPU
+clock ramped during the run; the matching candidate run was deferred when
+device free swap was about 130 MiB. This experiment establishes no inference
+speedup, so the stride-16 shader specialization was removed. The optional
+diagnostic now reports six batches to make future device-clock changes
+visible. Captures are in
+`$HOME/.local/share/pokitlms-tools/logs/android-q6-lane16-*-20261003.log`.
+
 The 2B/9B generation tests used the host RTX 2070 SUPER and resident Vulkan
 model cache; 35B used only bounded tensor windows with model caching disabled.
 The full 35B model was not generated. Each 2B/9B process read its model during

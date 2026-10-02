@@ -102,5 +102,76 @@ inline std::string run_vulkan_linear_checks() {
                << " vectorized_q4_k_calls=" << stats.vectorized_q4_k_calls
                << " allocated_bytes=" << stats.allocated_bytes << '\n';
     }
+#ifdef POKITLMS_GPU_DIAGNOSTICS
+    {
+        // A small, model-free Q6_K workload makes shader changes measurable
+        // on Android without loading a multi-gigabyte GGUF.
+        constexpr std::size_t rows = 2048;
+        constexpr std::size_t columns = 512;
+        constexpr std::size_t row_bytes = 420;
+        auto payload = std::make_shared<std::vector<std::byte>>(rows * row_bytes);
+        for (auto& byte : *payload) byte = static_cast<std::byte>(random() & 255U);
+        const auto put_half = [&payload](std::size_t offset, std::uint16_t value) {
+            (*payload)[offset] = static_cast<std::byte>(value & 255U);
+            (*payload)[offset + 1] = static_cast<std::byte>(value >> 8);
+        };
+        for (std::size_t row = 0; row < rows; ++row) {
+            for (std::size_t block = 0; block < columns / 256; ++block)
+                put_half(row * row_bytes + block * 210 + 208, 0x2800U);
+        }
+        pokitlms::model::TensorInfo tensor;
+        tensor.name = "q6_microbench";
+        tensor.dimensions = {columns, rows};
+        tensor.type = 14;
+        tensor.payload_size = payload->size();
+        pokitlms::model::TensorReader reader(tensor, payload);
+        std::vector<float> input(columns), cpu(rows), gpu(rows);
+        for (auto& value : input)
+            value = static_cast<float>(static_cast<int>(random() % 2049) - 1024) / 1024.0F;
+        pokitlms::model::tensor_linear(reader, input, cpu);
+
+        pokitlms::gpu::VulkanLinearOptions options;
+        options.tile_bytes = 1024U * 1024U;
+        options.use_subgroups = true;
+        pokitlms::gpu::VulkanLinearBackend backend(options);
+        for (int i = 0; i < 8; ++i) {
+            if (!backend.try_linear(reader, input, gpu))
+                throw std::runtime_error("Q6_K microbenchmark type was rejected");
+        }
+        const auto check_output = [&] {
+            double max_error = 0;
+            for (std::size_t row = 0; row < rows; ++row) {
+                const double error = std::abs(static_cast<double>(cpu[row]) - gpu[row]);
+                max_error = std::max(max_error, error);
+                if (!std::isfinite(gpu[row]) || error > 0.001 + 0.00002 * std::abs(cpu[row]))
+                    throw std::runtime_error("Q6_K microbenchmark CPU/GPU parity failed");
+            }
+            return max_error;
+        };
+        double max_error = check_output();
+        constexpr std::uint64_t measured_calls = 32;
+        constexpr std::uint64_t measured_batches = 6;
+        report << "q6_microbench_rows=" << rows << " columns=" << columns
+               << " warmup_calls=8 batches=" << measured_batches
+               << " calls_per_batch=" << measured_calls << '\n';
+        for (std::uint64_t batch = 0; batch < measured_batches; ++batch) {
+            const auto before = backend.stats();
+            for (std::uint64_t i = 0; i < measured_calls; ++i) {
+                if (!backend.try_linear(reader, input, gpu))
+                    throw std::runtime_error("Q6_K microbenchmark type was rejected");
+            }
+            const auto after = backend.stats();
+            if (after.q6_k_dispatches - before.q6_k_dispatches < measured_calls)
+                throw std::runtime_error("Q6_K microbenchmark did not dispatch each measured call");
+            const auto gpu_time_ns = after.q6_k_gpu_time_ns - before.q6_k_gpu_time_ns;
+            max_error = std::max(max_error, check_output());
+            report << "q6_microbench_batch=" << batch
+                   << " q6_gpu_ms=" << static_cast<double>(gpu_time_ns) / 1'000'000.0
+                   << " q6_gpu_us_per_call=" << static_cast<double>(gpu_time_ns) /
+                        static_cast<double>(measured_calls) / 1000.0
+                   << " max_abs_error=" << max_error << '\n';
+        }
+    }
+#endif
     return "PASS\n" + report.str();
 }
