@@ -313,7 +313,12 @@ the 6.17 GB model's working set was not retained by the page cache, resulting
 in about 77 GB of physical reads across the prompt and decode forwards. The
 2B run was only done on the host: at the time of the device check, the phone
 had about 366 MiB free RAM and 657 MiB free swap, so a full-model run was not
-safe to start.
+safe to start. A later check showed about 938 MiB `MemAvailable` and 665 MiB
+`SwapFree`. During an attempt to stage the model in the app's private files,
+`SwapFree` reached 0; the transfer was stopped after about 838 MiB and the
+partial model file was deleted. After cleanup, `MemAvailable` was about
+1.42 GiB and `SwapFree` about 58 MiB. No 2B inference was started on the
+phone.
 
 Captured host logs are retained under
 `$HOME/.local/share/pokitlms-tools/logs/` as
