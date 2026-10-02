@@ -499,6 +499,30 @@ The result does not indicate a disk read for every generated token. This was a
 host GPU test; no Android inference was run. Logs are retained at
 `$HOME/.local/share/pokitlms-tools/logs/qwen35-2b-q4-vectorized-{on1,off1,on2,off2}-20261003.log`.
 
+### Per-format Vulkan dispatch timing on Qwen3.5-9B
+
+The benchmark now groups Vulkan dispatch counts and GPU timestamp totals by
+weight format. One RTX 2070 SUPER run used `hi`, vectorized Q4_K, 4 MiB
+transfer windows, and the resident model cache. It completed the same 14-token
+greeting as prior Vulkan runs at 8.14 decode tokens/s; its first eight tokens
+also match the CPU reference run.
+
+| Weight format | Dispatches | Accumulated GPU time | Share |
+| --- | ---: | ---: | ---: |
+| Q4_K | 2,728 | 714.0 ms | 59.9% |
+| Q5_K | 352 | 32.3 ms | 2.7% |
+| Q6_K | 1,238 | 367.9 ms | 30.8% |
+| Q8_0 | 264 | 54.5 ms | 4.6% |
+| Other | 1,056 | 23.9 ms | 2.0% |
+
+These GPU timestamps sum dispatch execution during both prompt prefill and
+decode; they are not decode-only wall time. Q6_K accounts for about 31% of
+the measured shader time in this dense 9B run, so it is a meaningful next
+kernel target. A routed 35B-A3B token will touch only selected expert tensors,
+so its Q6_K cost must be profiled separately without inferring it from the
+whole-file format histogram. The captured run is
+`$HOME/.local/share/pokitlms-tools/logs/qwen35-9b-quant-profile-hi32-20261003.log`.
+
 ### Rejected Q4_K integer-dot experiment
 
 An experimental Vulkan Q4_K path quantized each 32-value activation block to

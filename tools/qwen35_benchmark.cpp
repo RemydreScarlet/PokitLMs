@@ -219,10 +219,20 @@ int main(int argc, char** argv) {
                 std::cerr << "event=gpu_totals calls=" << gpu.linear_calls
                           << " dispatches=" << gpu.dispatches
                           << " vectorized_q4_k_calls=" << gpu.vectorized_q4_k_calls
+                          << " q4_k_dispatches=" << gpu.q4_k_dispatches
+                          << " q5_k_dispatches=" << gpu.q5_k_dispatches
+                          << " q6_k_dispatches=" << gpu.q6_k_dispatches
+                          << " q8_0_dispatches=" << gpu.q8_0_dispatches
+                          << " other_dispatches=" << gpu.other_dispatches
                           << " weight_bytes=" << gpu.weight_bytes
                           << " read_ms=" << milliseconds(gpu.read_time_ns)
                           << " wait_ms=" << milliseconds(gpu.wait_time_ns)
                           << " gpu_ms=" << milliseconds(gpu.gpu_time_ns)
+                          << " gpu_q4_k_ms=" << milliseconds(gpu.q4_k_gpu_time_ns)
+                          << " gpu_q5_k_ms=" << milliseconds(gpu.q5_k_gpu_time_ns)
+                          << " gpu_q6_k_ms=" << milliseconds(gpu.q6_k_gpu_time_ns)
+                          << " gpu_q8_0_ms=" << milliseconds(gpu.q8_0_gpu_time_ns)
+                          << " gpu_other_ms=" << milliseconds(gpu.other_gpu_time_ns)
                           << " pipeline_ms=" << milliseconds(gpu.pipeline_time_ns)
                           << " cache_ms=" << milliseconds(gpu.cache_time_ns)
                           << " model_cache_active=" << gpu.model_cache_active
@@ -286,6 +296,16 @@ int main(int argc, char** argv) {
         if (vulkan) {
             std::cerr << "gpu_model_cache_active=" << gpu_stats.model_cache_active << '\n'
                       << "gpu_vectorized_q4_k_calls=" << gpu_stats.vectorized_q4_k_calls << '\n'
+                      << "gpu_q4_k_dispatches=" << gpu_stats.q4_k_dispatches << '\n'
+                      << "gpu_q5_k_dispatches=" << gpu_stats.q5_k_dispatches << '\n'
+                      << "gpu_q6_k_dispatches=" << gpu_stats.q6_k_dispatches << '\n'
+                      << "gpu_q8_0_dispatches=" << gpu_stats.q8_0_dispatches << '\n'
+                      << "gpu_other_dispatches=" << gpu_stats.other_dispatches << '\n'
+                      << "gpu_q4_k_ms=" << milliseconds(gpu_stats.q4_k_gpu_time_ns) << '\n'
+                      << "gpu_q5_k_ms=" << milliseconds(gpu_stats.q5_k_gpu_time_ns) << '\n'
+                      << "gpu_q6_k_ms=" << milliseconds(gpu_stats.q6_k_gpu_time_ns) << '\n'
+                      << "gpu_q8_0_ms=" << milliseconds(gpu_stats.q8_0_gpu_time_ns) << '\n'
+                      << "gpu_other_ms=" << milliseconds(gpu_stats.other_gpu_time_ns) << '\n'
                       << "gpu_model_cache_capacity_bytes=" << gpu_stats.model_cache_capacity_bytes << '\n'
                       << "gpu_model_cache_uploaded_bytes=" << gpu_stats.model_cache_uploaded_bytes << '\n'
                       << "gpu_model_cache_upload_ms=" << milliseconds(gpu_stats.model_cache_upload_time_ns) << '\n';

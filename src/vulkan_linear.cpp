@@ -357,8 +357,16 @@ public:
             check(vkGetQueryPoolResults(device, query_pool, slot * 2, 2, sizeof(times), times.data(),
                                        sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT), "read GPU timestamps");
             const auto mask = timestamp_bits == 64 ? ~std::uint64_t(0) : (std::uint64_t(1) << timestamp_bits) - 1;
-            counters.gpu_time_ns += static_cast<std::uint64_t>(
+            const auto elapsed_ns = static_cast<std::uint64_t>(
                 static_cast<double>((times[1] - times[0]) & mask) * properties.limits.timestampPeriod);
+            counters.gpu_time_ns += elapsed_ns;
+            switch (pending_weight_types[slot]) {
+                case 12: counters.q4_k_gpu_time_ns += elapsed_ns; break;
+                case 13: counters.q5_k_gpu_time_ns += elapsed_ns; break;
+                case 14: counters.q6_k_gpu_time_ns += elapsed_ns; break;
+                case 8: counters.q8_0_gpu_time_ns += elapsed_ns; break;
+                default: counters.other_gpu_time_ns += elapsed_ns; break;
+            }
             pending_timestamps[slot] = false;
         }
     }
@@ -556,7 +564,7 @@ public:
 
     void submit(std::size_t slot, VkPipeline compute, std::uint32_t columns,
                 std::uint32_t rows, std::uint32_t row_bytes, std::uint32_t first,
-                std::uint32_t rows_per_workgroup) {
+                std::uint32_t rows_per_workgroup, std::uint32_t weight_type) {
         auto command = command_buffers[slot];
         check(vkResetCommandBuffer(command, 0), "reset command buffer");
         auto begin = info<VkCommandBufferBeginInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
@@ -590,6 +598,14 @@ public:
         check(vkQueueSubmit(queue, 1, &submit_info, fences[slot]), "submit compute");
         pending[slot] = true;
         pending_timestamps[slot] = query_pool != VK_NULL_HANDLE;
+        pending_weight_types[slot] = weight_type;
+        switch (weight_type) {
+            case 12: ++counters.q4_k_dispatches; break;
+            case 13: ++counters.q5_k_dispatches; break;
+            case 14: ++counters.q6_k_dispatches; break;
+            case 8: ++counters.q8_0_dispatches; break;
+            default: ++counters.other_dispatches; break;
+        }
         ++counters.dispatches;
     }
 
@@ -697,7 +713,7 @@ public:
                     counters.cache_time_ns += ns_since(cache_start);
                 }
                 submit(slot, compute, input.size(), rows, row_bytes, first,
-                       dispatch_rows_per_group);
+                       dispatch_rows_per_group, tensor.type);
                 first += rows;
             }
             wait_slot(0);
@@ -763,6 +779,7 @@ public:
     std::array<VkFence, 2> fences{};
     std::array<bool, 2> pending{};
     std::array<bool, 2> pending_timestamps{};
+    std::array<std::uint32_t, 2> pending_weight_types{};
     VkQueryPool query_pool{};
     VkDescriptorSetLayout descriptor_layout{};
     VkDescriptorPool descriptor_pool{};
