@@ -281,6 +281,45 @@ for small uploads and describes lower peak write performance than system
 memory for large transfers. Alternative memory choices require an A/B
 comparison of read, GPU, and total time. [Vulkan memory allocation guidance](https://docs.vulkan.org/spec/latest/chapters/memory.html)
 
+### Qwen3.5-2B host run and repeated weight reads
+
+The 1,396,198,496-byte Q4_K_M conversion of Qwen3.5-2B loaded and generated
+on the host. CPU and Vulkan smoke runs with `hi` produced the same two token
+IDs (`248068,198`). The longer Vulkan check used an RTX 2070 SUPER, a 4 MiB
+tile size, a 16-token prompt, and eight generated tokens. Baseline and a
+temporary Q4_K/Q5_K shader-factorization candidate produced the same eight
+token IDs:
+`248068,271,248069,271,8160,513,2250,2716`.
+
+| Shader | Prefill (s) | Decode, 7 forwards (s) | Decode forwards/s | Cumulative `read_ms` / `gpu_ms` (s) | Physical file reads |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 34.065 | 26.719 | 0.261987 | 56.009 / 2.828 | 6,225,920 bytes |
+| Factored candidate | 33.719 | 26.725 | 0.261932 | 55.718 / 2.810 | 0 bytes |
+
+The candidate did not improve end-to-end decode speed and was discarded. The
+host's OS cache was warm: despite 24,065,103,600 logical weight bytes being
+read across the run, physical storage reads were only a few megabytes. The
+reported `read_ms` still reached about 56 seconds because it includes fetching
+cached file pages and copying each row tile into Vulkan's mapped weight
+buffers; that counter also overlaps GPU work and fence waits.
+
+The runner deliberately keeps only two 4 MiB Vulkan weight windows instead of
+duplicating the full model in RAM or GPU memory. Each linear layer reads its
+weight rows from the model file with `pread`, copies them into one of those
+windows, and dispatches the shader. The next generated token uses those
+weights again, so the same rows are read and copied repeatedly. This bounds
+resident memory but makes weight delivery expensive. On the Pixel 9a 9B run,
+the 6.17 GB model's working set was not retained by the page cache, resulting
+in about 77 GB of physical reads across the prompt and decode forwards. The
+2B run was only done on the host: at the time of the device check, the phone
+had about 366 MiB free RAM and 657 MiB free swap, so a full-model run was not
+safe to start.
+
+Captured host logs are retained under
+`$HOME/.local/share/pokitlms-tools/logs/` as
+`qwen35-2b-vulkan-baseline-8tok-captured-20261003.log` and
+`qwen35-2b-vulkan-factor-8tok-captured-20261003.log`.
+
 ### Numerical checks
 
 Randomized packed-kernel comparisons, multiple stream-window reuse, both
