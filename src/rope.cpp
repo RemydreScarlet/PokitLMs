@@ -36,4 +36,15 @@ void rope_inplace(
     }
 }
 
+void apply_rope(std::span<float> query, std::span<float> key,
+                std::size_t num_heads, std::size_t num_kv_heads,
+                std::size_t head_dim, std::size_t position, float theta) {
+    if (head_dim == 0 || query.size() % head_dim != 0 || key.size() % head_dim != 0 ||
+        query.size() / head_dim != num_heads || key.size() / head_dim != num_kv_heads) {
+        throw std::invalid_argument("RoPE query/key size mismatch");
+    }
+    rope_inplace(query, head_dim, head_dim, position, theta);
+    rope_inplace(key, head_dim, head_dim, position, theta);
+}
+
 }  // namespace pokitlms

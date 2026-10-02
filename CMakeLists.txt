@@ -25,6 +25,8 @@ add_library(pokitlms
     src/qwen3_moe_runner.cpp
     src/architecture.cpp
     src/kv_cache.cpp
+    src/reference_kv_cache.cpp
+    src/attention.cpp
     src/qwen3_moe_index.cpp
     src/qwen35_index.cpp
     src/qwen35_runner.cpp
