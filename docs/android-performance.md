@@ -16,7 +16,7 @@ The real-model test accepts the following instrumentation arguments:
 | `pokitlms.maxTokens` | `1` | Maximum generated token count. |
 | `pokitlms.ioThreads` | `3` | Expert I/O workers, from 1 to 4. |
 | `pokitlms.backend` | `cpu` | `cpu` or `vulkan`; Vulkan accelerates Qwen3.5 linear operations. |
-| `pokitlms.gpuTileMiB` | `16` | Capacity of each of the two GPU weight windows. |
+| `pokitlms.gpuTileMiB` | `8` | Capacity of each of the two GPU weight windows. |
 | `pokitlms.gpuMode` | `subgroup` | `subgroup` or `workgroup` reduction. |
 | `pokitlms.gpuVectorizedQ4` | `true` | Enable packed Q4_K/Q5_K subgroup shader path; set `false` for A/B. |
 | `pokitlms.prompt` | `hi` | User message passed to the model's chat template. |
@@ -51,7 +51,7 @@ adb shell am instrument -w -r \
   -e class org.pokit.pokitlms.AndroidInferenceSmokeTest#loadsCallerProvidedFullModelWhenConfigured \
   -e pokitlms.modelPath /data/user/0/org.pokit.pokitlms/files/qwen35-9b.gguf \
   -e pokitlms.backend vulkan -e pokitlms.maxTokens 8 \
-  -e pokitlms.gpuTileMiB 16 -e pokitlms.gpuMode subgroup \
+  -e pokitlms.gpuTileMiB 8 -e pokitlms.gpuMode subgroup \
   -e pokitlms.prompt hi \
   org.pokit.pokitlms.test/androidx.test.runner.AndroidJUnitRunner
 adb logcat -d -s PokitLMsAB:I > "$HOME/.local/share/pokitlms-tools/logs/android-vulkan.log"
@@ -105,7 +105,9 @@ residency. Positioned reads fill the next window while the current window
 executes on the GPU. Fence completion is required before reusing a window;
 inputs and outputs have separate buffers. Subgroup and workgroup reductions
 are available. Floating-point reduction order differs from CPU arithmetic,
-so this is numerical parity rather than a bitwise guarantee.
+so this is numerical parity rather than a bitwise guarantee. The Android
+bridge uses 8 MiB per window by default based on the Pixel 9a A/B results
+below; the generic C++ backend retains its 16 MiB default.
 
 The host CMake option is `POKITLMS_USE_VULKAN=ON`, with Python 3, Vulkan
 headers/loader, and `glslc` required. Android Gradle builds enable Vulkan and
@@ -180,6 +182,24 @@ path difference. The shader change improves the measured GPU kernel portion,
 but does not produce a measurable end-to-end token-rate gain on this device
 and workload.
 
+### Android weight-window size A/B
+
+The Android benchmark initially used 16 MiB per mapped window. Across three
+packed-shader runs, that setting averaged 148.17 seconds. Three runs at 8 MiB
+(including a run with the default argument omitted) averaged 136.84 seconds,
+about 7.6% less total time, with 0.104 decode forwards/s versus 0.102 at
+16 MiB. Their decode times averaged 67.45 and 68.76 seconds, respectively.
+The 8 MiB runs used about 17.8 MB total Vulkan buffer allocation, compared
+with 34.6 MB at 16 MiB.
+
+A single 32 MiB run took 174.37 seconds. It reduced dispatches from 6,864 to
+4,424 but increased cumulative read and fence-wait times. The 8 MiB setting
+increased dispatches to 12,192 but had lower fence-wait time. This indicates
+that more frequent, smaller submissions overlap better with weight reads on
+this Mali GPU. The app and instrumentation defaults are now 8 MiB; the
+`pokitlms.gpuTileMiB` argument can override the value. These measurements are
+specific to the Pixel 9a and should be retuned for other devices.
+
 ### Weight delivery and cache state
 
 The host Vulkan run recorded 78,500,200,448 logical weight bytes, 153,963 ms
@@ -219,8 +239,8 @@ instead of being served from cache. Vulkan `read_ms` averaged 105.6-106.8
 seconds; it includes copying from the file/page cache into mapped Vulkan
 memory and overlaps other work. The process RSS stayed around 0.3 GiB, with
 roughly 1.4-1.5 GiB system `MemAvailable`. Repeated weight delivery is the
-dominant measured cost; the 16 MiB double buffer avoids loading the full model
-into memory but cannot retain weights between forwards.
+dominant measured cost; the double buffer avoids loading the full model into
+memory but cannot retain weights between forwards.
 
 On NVIDIA, the initial memory-selection policy favors uncached host-visible
 device-local BAR memory over cached system memory. On Mali, it favors cached

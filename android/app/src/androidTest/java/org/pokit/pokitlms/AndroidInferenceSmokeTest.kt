@@ -30,7 +30,7 @@ class AndroidInferenceSmokeTest {
         val ioThreads = arguments.getString("pokitlms.ioThreads")?.toIntOrNull() ?: 3
         val maxTokens = arguments.getString("pokitlms.maxTokens")?.toIntOrNull() ?: 1
         val backend = arguments.getString("pokitlms.backend") ?: "cpu"
-        val gpuTileMiB = arguments.getString("pokitlms.gpuTileMiB")?.toIntOrNull() ?: 16
+        val gpuTileMiB = arguments.getString("pokitlms.gpuTileMiB")?.toIntOrNull() ?: 8
         val gpuMode = arguments.getString("pokitlms.gpuMode") ?: "subgroup"
         check(gpuMode == "subgroup" || gpuMode == "workgroup")
         val gpuSubgroups = gpuMode == "subgroup"
