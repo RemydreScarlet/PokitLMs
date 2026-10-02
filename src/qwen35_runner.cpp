@@ -387,7 +387,10 @@ public:
                     tensor_linear(*readers.linear_beta, normalized,
                         std::span<float>(scratch.ffn_up.data(), linear_v_heads), 0, &scratch.linear);
                     for (std::size_t head = 0; head < linear_v_heads; ++head) {
-                        const float decay = -std::exp(readers.linear_a[head]) *
+                        // GGUF stores ssm_a as -exp(A_log) (the converter folds
+                        // this transformation into the tensor). Apply the
+                        // timestep softplus directly, as the reference graph does.
+                        const float decay = readers.linear_a[head] *
                             softplus(scratch.ffn_gate[head] + readers.linear_dt_bias[head]);
                         scratch.ffn_gate[head] = decay;
                         scratch.ffn_up[head] = sigmoid(scratch.ffn_up[head]);
