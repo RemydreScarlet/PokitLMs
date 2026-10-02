@@ -476,6 +476,42 @@ retained at
 and
 `$HOME/.local/share/pokitlms-tools/logs/qwen35-9b-q4-vectorized-{on,off}-hi32-20261003.log`.
 
+### Q4_K vectorized shader A/B on Qwen3.5-2B
+
+Four RTX 2070 SUPER runs used the 1,396,198,496-byte Q4_K_M model, the prompt
+`Reply with exactly the word OK.`, subgroup mode, 4 MiB transfer windows, and
+automatic whole-model caching. The cache was active in all runs. Each returned
+`OK` and the same six token IDs, ending at EOS:
+`248068,271,248069,271,3793,248046`.
+
+| Q4_K subgroup path | Decode tokens/s, two runs | Mean | Mean decode time, 5 forwards |
+| --- | ---: | ---: | ---: |
+| Vectorized | 15.35, 15.33 | 15.34 | 0.326 s |
+| Scalar | 15.08, 14.93 | 15.01 | 0.333 s |
+
+Vectorization improved decode throughput by 2.2% in this short 2B prompt.
+Telemetry recorded 2,140 vectorized Q4_K/Q5_K calls per enabled run and zero
+when disabled. Each fresh process uploaded the 1.396 GB model and recorded
+about 1.498 GB of physical reads. This is the initial cache fill: the loader
+uses `read_into_uncached` and `POSIX_FADV_DONTNEED` so the file page cache does
+not retain a second copy, then decodes from the resident Vulkan model cache.
+The result does not indicate a disk read for every generated token. This was a
+host GPU test; no Android inference was run. Logs are retained at
+`$HOME/.local/share/pokitlms-tools/logs/qwen35-2b-q4-vectorized-{on1,off1,on2,off2}-20261003.log`.
+
+### Rejected Q4_K integer-dot experiment
+
+An experimental Vulkan Q4_K path quantized each 32-value activation block to
+Q8_1 and used the device's packed signed 4x8-bit integer dot operation. On the
+RTX 2070 SUPER, it returned the same completed `hi` response and token IDs as
+the vectorized floating-point path, but decoded at 0.4208 tokens/s versus
+8.0678 tokens/s for the existing path under the same 9B run conditions (about
+19 times slower). The integer shader matched its Q8_1 reference within
+7.63e-5 maximum absolute error; that check does not establish accuracy against
+the original FP32 activations for general inputs. The candidate was removed.
+Its captured output remains at
+`$HOME/.local/share/pokitlms-tools/logs/qwen35-9b-intdot-on-hi32-20261003.log`.
+
 ### Numerical checks
 
 Randomized packed-kernel comparisons, multiple stream-window reuse, both
