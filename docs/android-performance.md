@@ -16,7 +16,7 @@ The real-model test accepts the following instrumentation arguments:
 | `pokitlms.maxTokens` | `1` | Maximum generated token count. |
 | `pokitlms.ioThreads` | `3` | Expert I/O workers, from 1 to 4. |
 | `pokitlms.backend` | `cpu` | `cpu` or `vulkan`; Vulkan accelerates Qwen3.5 linear operations. |
-| `pokitlms.gpuTileMiB` | `8` | Capacity of each of the two GPU weight windows. |
+| `pokitlms.gpuTileMiB` | `4` | Capacity of each of the two GPU weight windows. |
 | `pokitlms.gpuMode` | `subgroup` | `subgroup` or `workgroup` reduction. |
 | `pokitlms.gpuVectorizedQ4` | `true` | Enable packed Q4_K/Q5_K subgroup shader path; set `false` for A/B. |
 | `pokitlms.prompt` | `hi` | User message passed to the model's chat template. |
@@ -51,7 +51,7 @@ adb shell am instrument -w -r \
   -e class org.pokit.pokitlms.AndroidInferenceSmokeTest#loadsCallerProvidedFullModelWhenConfigured \
   -e pokitlms.modelPath /data/user/0/org.pokit.pokitlms/files/qwen35-9b.gguf \
   -e pokitlms.backend vulkan -e pokitlms.maxTokens 8 \
-  -e pokitlms.gpuTileMiB 8 -e pokitlms.gpuMode subgroup \
+  -e pokitlms.gpuTileMiB 4 -e pokitlms.gpuMode subgroup \
   -e pokitlms.prompt hi \
   org.pokit.pokitlms.test/androidx.test.runner.AndroidJUnitRunner
 adb logcat -d -s PokitLMsAB:I > "$HOME/.local/share/pokitlms-tools/logs/android-vulkan.log"
@@ -106,7 +106,7 @@ executes on the GPU. Fence completion is required before reusing a window;
 inputs and outputs have separate buffers. Subgroup and workgroup reductions
 are available. Floating-point reduction order differs from CPU arithmetic,
 so this is numerical parity rather than a bitwise guarantee. The Android
-bridge uses 8 MiB per window by default based on the Pixel 9a A/B results
+bridge uses 4 MiB per window by default based on the Pixel 9a A/B results
 below; the generic C++ backend retains its 16 MiB default.
 
 The host CMake option is `POKITLMS_USE_VULKAN=ON`, with Python 3, Vulkan
@@ -192,13 +192,22 @@ about 7.6% less total time, with 0.104 decode forwards/s versus 0.102 at
 The 8 MiB runs used about 17.8 MB total Vulkan buffer allocation, compared
 with 34.6 MB at 16 MiB.
 
+The first 4 MiB run recorded 118.497 seconds in generation (55.82 seconds
+prefill and 62.67 seconds decode), about 13% below the 8 MiB generation-time
+mean and 20% below the 16 MiB mean. A repeat instrumentation run also passed:
+its total test time was 119.842 seconds, close to 119.932 seconds for the
+first test. The first 4 MiB run produced the same token IDs as the larger
+window runs. Total Vulkan buffer allocation was about 9.4 MB. The app and
+instrumentation defaults are now 4 MiB; `pokitlms.gpuTileMiB` remains
+available to override the value.
+
 A single 32 MiB run took 174.37 seconds. It reduced dispatches from 6,864 to
 4,424 but increased cumulative read and fence-wait times. The 8 MiB setting
-increased dispatches to 12,192 but had lower fence-wait time. This indicates
-that more frequent, smaller submissions overlap better with weight reads on
-this Mali GPU. The app and instrumentation defaults are now 8 MiB; the
-`pokitlms.gpuTileMiB` argument can override the value. These measurements are
-specific to the Pixel 9a and should be retuned for other devices.
+increased dispatches to 12,192, and 4 MiB to 20,664, while cumulative
+fence-wait time dropped to about 7 seconds at 4 MiB. More frequent, smaller
+submissions overlap better with weight reads on this Mali GPU. These
+measurements are specific to the Pixel 9a and should be retuned for other
+devices.
 
 ### Weight delivery and cache state
 

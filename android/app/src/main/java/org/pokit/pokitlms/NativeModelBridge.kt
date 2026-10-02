@@ -4,7 +4,7 @@ package org.pokit.pokitlms
 internal class NativeModelBridge {
     external fun load(
         fd: Int, ioThreads: Int, useVulkan: Boolean = false,
-        gpuTileMiB: Int = 8, gpuSubgroups: Boolean = true,
+        gpuTileMiB: Int = 4, gpuSubgroups: Boolean = true,
         gpuVectorizedQ4: Boolean = true
     ): Long
     external fun generate(handle: Long, prompt: String, maxTokens: Int): String

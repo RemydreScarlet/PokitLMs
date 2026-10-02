@@ -197,7 +197,7 @@ The benchmark variant includes optional kernel diagnostics selected with
 
 Android builds include Vulkan support. The GPU checkbox selects Vulkan for
 Qwen3.5 when loading a model. At the JNI boundary, Vulkan is opt-in through
-`NativeModelBridge.load(fd, ioThreads, useVulkan = true, gpuTileMiB = 8,
+`NativeModelBridge.load(fd, ioThreads, useVulkan = true, gpuTileMiB = 4,
 gpuSubgroups = true)`; the backend API defaults to CPU. Backend changes apply
 at model load. Vulkan initialization failures are reported to the caller.
 
