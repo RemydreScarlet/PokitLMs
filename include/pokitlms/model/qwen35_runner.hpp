@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -19,9 +20,27 @@ struct Qwen35GenerationStats {
     std::uint64_t decode_time_ns{};
     std::size_t prompt_tokens{};
     std::size_t generated_tokens{};
+    std::size_t decode_forward_tokens{};
     std::uint32_t first_generated_token_id{};
     bool has_generated_token{};
 };
+
+struct Qwen35ProgressEvent {
+    // Forward phases report compute duration. GeneratedToken reports the
+    // selected token immediately, with elapsed_ns == 0.
+    enum class Phase {
+        PrefillToken,
+        GeneratedToken,
+        DecodeForward,
+    };
+
+    Phase phase{};
+    std::size_t index{};
+    std::uint32_t token_id{};
+    std::uint64_t elapsed_ns{};
+};
+
+using Qwen35ProgressCallback = std::function<void(const Qwen35ProgressEvent&)>;
 
 struct Qwen35ExpertCacheStats {
     std::size_t capacity_bytes{};
@@ -40,6 +59,8 @@ public:
     explicit Qwen35Runner(std::filesystem::path model_path,
                           std::size_t context_capacity = 0,
                           KvCachePrecision kv_precision = KvCachePrecision::Float16);
+    Qwen35Runner(std::filesystem::path model_path, std::size_t context_capacity,
+                 KvCachePrecision kv_precision, std::size_t expert_io_threads);
     ~Qwen35Runner();
     Qwen35Runner(Qwen35Runner&&) noexcept;
     Qwen35Runner& operator=(Qwen35Runner&&) noexcept;
@@ -52,13 +73,16 @@ public:
     // before the prompt is consumed and retains the resulting decode state.
     [[nodiscard]] std::vector<std::uint32_t> generate_tokens(
         std::span<const std::uint32_t> prompt, std::size_t max_new_tokens,
-        Qwen35GenerationStats* stats = nullptr);
+        Qwen35GenerationStats* stats = nullptr,
+        const Qwen35ProgressCallback& progress = {});
     [[nodiscard]] std::string generate_text(std::string_view prompt,
                                             std::size_t max_new_tokens,
-                                            Qwen35GenerationStats* stats = nullptr);
+                                            Qwen35GenerationStats* stats = nullptr,
+                                            const Qwen35ProgressCallback& progress = {});
     [[nodiscard]] std::string generate_chat(std::string_view user_message,
                                             std::size_t max_new_tokens,
-                                            Qwen35GenerationStats* stats = nullptr);
+                                            Qwen35GenerationStats* stats = nullptr,
+                                            const Qwen35ProgressCallback& progress = {});
     void reset();
     [[nodiscard]] const Qwen35Config& config() const noexcept;
     [[nodiscard]] std::size_t kv_cache_storage_bytes() const noexcept;

@@ -33,13 +33,13 @@ double tokens_per_second(std::size_t tokens, std::uint64_t nanoseconds) {
 
 void usage(const char* executable) {
     std::cerr << "Usage: " << executable
-              << " MODEL.gguf USER_MESSAGE [new_tokens=32] [kv_window=0] [kv_precision=fp16|q8]\n";
+              << " MODEL.gguf USER_MESSAGE [new_tokens=32] [kv_window=0] [kv_precision=fp16|q8] [io_threads=3]\n";
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3 || argc > 6) {
+    if (argc < 3 || argc > 7) {
         usage(argv[0]);
         return 2;
     }
@@ -52,9 +52,10 @@ int main(int argc, char** argv) {
             if (precision == "q8") kv_precision = pokitlms::KvCachePrecision::Q8_0;
             else if (precision != "fp16") throw std::invalid_argument("KV precision must be fp16 or q8");
         }
+        const auto io_threads = argc > 6 ? parse_size(argv[6], "expert I/O thread count") : 3;
 
         const auto load_start = std::chrono::steady_clock::now();
-        pokitlms::model::Qwen35Runner runner(argv[1], kv_window, kv_precision);
+        pokitlms::model::Qwen35Runner runner(argv[1], kv_window, kv_precision, io_threads);
         const auto load_ns = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - load_start).count());
@@ -70,10 +71,11 @@ int main(int argc, char** argv) {
                   << "prompt_tokens=" << stats.prompt_tokens << '\n'
                   << "prefill_ms=" << milliseconds(stats.prefill_time_ns) << '\n'
                   << "decode_ms=" << milliseconds(stats.decode_time_ns) << '\n'
+                  << "decode_forward_tokens=" << stats.decode_forward_tokens << '\n'
                   << "prefill_tokens_per_second="
                   << tokens_per_second(stats.prompt_tokens, stats.prefill_time_ns) << '\n'
                   << "decode_tokens_per_second="
-                  << tokens_per_second(stats.generated_tokens, stats.decode_time_ns) << '\n'
+                  << tokens_per_second(stats.decode_forward_tokens, stats.decode_time_ns) << '\n'
                   << "model_bytes_read=" << runner.bytes_read_from_disk() - bytes_before << '\n'
                   << "kv_cache_storage_bytes=" << runner.kv_cache_storage_bytes() << '\n'
                   << "recurrent_state_storage_bytes="
@@ -81,6 +83,8 @@ int main(int argc, char** argv) {
                   << "expert_cache_capacity_bytes=" << expert_cache.capacity_bytes << '\n'
                   << "expert_cache_resident_bytes=" << expert_cache.resident_bytes << '\n'
                   << "expert_cache_bytes_read=" << expert_cache.bytes_read << '\n'
+                  << "expert_read_operations=" << expert_cache.read_operations << '\n'
+                  << "expert_read_ms=" << milliseconds(expert_cache.read_time_ns) << '\n'
                   << "expert_cache_hits=" << expert_cache.hits << '\n'
                   << "expert_cache_misses=" << expert_cache.misses << '\n';
         return 0;

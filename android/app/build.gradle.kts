@@ -12,6 +12,7 @@ dependencies {
 android {
     namespace = "org.pokit.pokitlms"
     compileSdk = 35
+    testBuildType = providers.gradleProperty("pokitlms.testBuildType").getOrElse("debug")
     defaultConfig {
         applicationId = "org.pokit.pokitlms"
         minSdk = 24
@@ -27,6 +28,17 @@ android {
     }
     externalNativeBuild {
         cmake { path = file("src/main/cpp/CMakeLists.txt"); version = "3.22.1" }
+    }
+    buildTypes {
+        create("benchmark") {
+            initWith(getByName("release"))
+            isDebuggable = true
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            externalNativeBuild {
+                cmake { cppFlags += listOf("-O2") }
+            }
+        }
     }
     sourceSets {
         getByName("androidTest").assets.srcDir("../../tests/data")

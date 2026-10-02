@@ -89,6 +89,6 @@ endif()
 
 if(ANDROID AND POKITLMS_BUILD_ANDROID_APP)
     add_library(pokitlms_android SHARED android/app/src/main/cpp/jni.cpp)
-    target_link_libraries(pokitlms_android PRIVATE PokitLMs::pokitlms)
+    target_link_libraries(pokitlms_android PRIVATE PokitLMs::pokitlms log)
     target_compile_features(pokitlms_android PRIVATE cxx_std_20)
 endif()

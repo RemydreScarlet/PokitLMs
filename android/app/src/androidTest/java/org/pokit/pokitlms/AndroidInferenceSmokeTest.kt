@@ -1,6 +1,8 @@
 package org.pokit.pokitlms
 
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
+import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
@@ -14,16 +16,23 @@ import java.io.File
 class AndroidInferenceSmokeTest {
     @Test
     fun loadsCallerProvidedFullModelWhenConfigured() {
-        val modelPath = InstrumentationRegistry.getArguments().getString("pokitlms.modelPath")
+        val arguments = InstrumentationRegistry.getArguments()
+        val modelPath = arguments.getString("pokitlms.modelPath")
         assumeTrue("set pokitlms.modelPath to run the full-model device check", !modelPath.isNullOrBlank())
+        val ioThreads = arguments.getString("pokitlms.ioThreads")?.toIntOrNull() ?: 3
+        val maxTokens = arguments.getString("pokitlms.maxTokens")?.toIntOrNull() ?: 1
         val model = File(modelPath!!)
         check(model.isFile) { "model file does not exist: $modelPath" }
 
         val bridge = NativeModelBridge()
         ParcelFileDescriptor.open(model, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-            val handle = bridge.load(descriptor.fd)
+            val handle = bridge.load(descriptor.fd, ioThreads)
             try {
-                assertTrue(bridge.generate(handle, "hi", 1).isNotEmpty())
+                val start = SystemClock.elapsedRealtimeNanos()
+                val reply = bridge.generate(handle, "hi", maxTokens)
+                val elapsedMs = (SystemClock.elapsedRealtimeNanos() - start) / 1_000_000
+                Log.i("PokitLMsAB", "io_threads=$ioThreads max_tokens=$maxTokens elapsed_ms=$elapsedMs reply=$reply")
+                assertTrue(reply.isNotEmpty())
             } finally {
                 bridge.close(handle)
             }
@@ -40,7 +49,7 @@ class AndroidInferenceSmokeTest {
                 model.outputStream().use { output -> input.copyTo(output) }
             }
             ParcelFileDescriptor.open(model, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-                val handle = bridge.load(descriptor.fd)
+            val handle = bridge.load(descriptor.fd, 3)
                 try {
                     assertEquals(filename, "aaa", bridge.generate(handle, "hi", 3))
                 } finally {

@@ -33,7 +33,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Expert tensor splitting by the GGUF last dimension, ready to feed routed slices into the bounded store.
 - Validated GGUF architecture parameters and tensor index for Qwen3-MoE (`qwen3moe`); the token executor is still awaiting comparison with a reference model.
 - Qwen3.5 GGUF tensor index and greedy text generation for dense and MoE Qwen3.5 models; prompt prefill skips vocabulary projection until its final token, recurrent convolution/DeltaNet state and bounded full-attention KV state are held and reported separately, and matrix weights stay file-backed.
-- `pokitlms-qwen35-bench MODEL.gguf USER_MESSAGE [new_tokens] [kv_window] [kv_precision]` reports prefill/decode throughput, attention and recurrent state memory, and (for MoE) expert-cache capacity and hit counts.
+- `pokitlms-qwen35-bench MODEL.gguf USER_MESSAGE [new_tokens] [kv_window] [kv_precision] [io_threads]` reports prefill/decode throughput, attention and recurrent state memory, and (for MoE) expert-cache capacity, hit counts, and read time. Qwen3.5 MoE I/O threads can be set from 1 to 4 for device-specific comparisons; the default is 3.
 - Tied-output Qwen3-MoE GGUF support: when `output.weight` is absent, the runner reuses `token_embd.weight` for vocabulary projection.
 - Qwen3-MoE tensor-name/shape index for the model's base, attention, router, and expert tensors.
 - Qwen GPT-2 byte-level BPE encoder/decoder using GGUF vocabulary, merge, token-type, and special-token metadata.
@@ -128,6 +128,18 @@ The instrumentation suite also has an opt-in real-model JNI check. Set the
 `pokitlms.modelPath` instrumentation argument to a GGUF path readable by the
 app; it loads the model through a file descriptor and generates one token.
 Without that argument, the full-model check is skipped.
+
+Use the optimized, debug-signed benchmark variant for performance measurements:
+
+```bash
+gradle -p android -Ppokitlms.testBuildType=benchmark connectedBenchmarkAndroidTest
+```
+
+Its native code is compiled with `-O2`; the ordinary Debug variant has no native
+optimization and must not be used to report inference speed. The full-model
+check also accepts `pokitlms.maxTokens` and `pokitlms.ioThreads`. The `PokitLMsAB`
+logcat tag records each prompt/decoded token, wall time, process CPU time,
+RSS/swap, system available memory, and the prefill/decode summary.
 
 The app opens GGUF files through Android's system file picker and keeps the
 selected descriptor open while the native runner reads weights from it, so it

@@ -1,26 +1,34 @@
 #include <jni.h>
+#include <android/log.h>
 
 #include "pokitlms/model/gguf_reader.hpp"
 #include "pokitlms/model/qwen3_moe_runner.hpp"
 #include "pokitlms/model/qwen35_runner.hpp"
 
 #include <memory>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <sys/resource.h>
 #include <variant>
 #include <vector>
 
 namespace {
 struct Engine {
-    explicit Engine(const std::string& path) {
+    Engine(const std::string& path, std::size_t expert_io_threads) {
         pokitlms::model::GgufReader gguf(path);
         const auto it = gguf.metadata().find("general.architecture");
         if (it == gguf.metadata().end() || !std::holds_alternative<std::string>(it->second.value))
             throw std::runtime_error("GGUF has no valid general.architecture metadata");
         const auto& architecture = std::get<std::string>(it->second.value);
-        if (architecture == "qwen3moe") moe = std::make_unique<pokitlms::model::Qwen3MoeRunner>(path);
+        if (architecture == "qwen3moe")
+            moe = std::make_unique<pokitlms::model::Qwen3MoeRunner>(
+                path, 128U * 1024U * 1024U, 0, pokitlms::KvCachePrecision::Float16,
+                expert_io_threads);
         else if (architecture == "qwen35" || architecture == "qwen35moe")
-            dense = std::make_unique<pokitlms::model::Qwen35Runner>(path);
+            dense = std::make_unique<pokitlms::model::Qwen35Runner>(
+                path, 0, pokitlms::KvCachePrecision::Float16, expert_io_threads);
         else throw std::runtime_error("Unsupported GGUF architecture: " + architecture);
     }
     std::unique_ptr<pokitlms::model::Qwen3MoeRunner> moe;
@@ -91,13 +99,45 @@ void throw_java(JNIEnv* env, const char* type, const std::string& message) {
     jclass cls = env->FindClass(type);
     if (cls) env->ThrowNew(cls, message.c_str());
 }
+
+std::uint64_t proc_kb_value(const char* path, const char* field) {
+    std::ifstream input(path);
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream parsed(line);
+        std::string name;
+        std::uint64_t value = 0;
+        std::string unit;
+        if (parsed >> name >> value >> unit && name == field) return value;
+    }
+    return 0;
+}
+
+double timeval_ms(const timeval& value) {
+    return static_cast<double>(value.tv_sec) * 1000.0 +
+           static_cast<double>(value.tv_usec) / 1000.0;
+}
+
+const char* progress_phase(pokitlms::model::Qwen35ProgressEvent::Phase phase) {
+    using Phase = pokitlms::model::Qwen35ProgressEvent::Phase;
+    switch (phase) {
+        case Phase::PrefillToken: return "prefill_token";
+        case Phase::GeneratedToken: return "generated_token";
+        case Phase::DecodeForward: return "decode_forward";
+    }
+    return "unknown";
+}
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_org_pokit_pokitlms_NativeModelBridge_load(JNIEnv* env, jobject, jint fd) {
+Java_org_pokit_pokitlms_NativeModelBridge_load(JNIEnv* env, jobject, jint fd,
+                                               jint expert_io_threads) {
     try {
+        if (expert_io_threads < 1 || expert_io_threads > 4)
+            throw std::invalid_argument("expert I/O threads must be between 1 and 4");
         const std::string path = "/proc/self/fd/" + std::to_string(fd);
-        return reinterpret_cast<jlong>(new Engine(path));
+        return reinterpret_cast<jlong>(new Engine(path,
+            static_cast<std::size_t>(expert_io_threads)));
     } catch (const std::exception& e) {
         throw_java(env, "java/lang/IllegalArgumentException", e.what());
         return 0;
@@ -111,8 +151,46 @@ Java_org_pokit_pokitlms_NativeModelBridge_generate(JNIEnv* env, jobject, jlong h
         auto* engine = reinterpret_cast<Engine*>(handle);
         if (!engine) throw std::runtime_error("Model is not loaded");
         const std::string message = utf8_string(env, prompt);
-        const auto answer = engine->moe ? engine->moe->generate_chat(message, max_tokens)
-                                        : engine->dense->generate_chat(message, max_tokens);
+        if (engine->moe) {
+            const auto answer = engine->moe->generate_chat(message, max_tokens);
+            return java_string(env, answer);
+        }
+
+        pokitlms::model::Qwen35GenerationStats stats;
+        const pokitlms::model::Qwen35ProgressCallback progress =
+            [](const pokitlms::model::Qwen35ProgressEvent& event) {
+                rusage usage{};
+                getrusage(RUSAGE_SELF, &usage);
+                const auto rss_kb = proc_kb_value("/proc/self/status", "VmRSS:");
+                const auto swap_kb = proc_kb_value("/proc/self/status", "VmSwap:");
+                const auto vm_kb = proc_kb_value("/proc/self/status", "VmSize:");
+                const auto available_kb = proc_kb_value("/proc/meminfo", "MemAvailable:");
+                const auto swap_free_kb = proc_kb_value("/proc/meminfo", "SwapFree:");
+                __android_log_print(ANDROID_LOG_INFO, "PokitLMsAB",
+                    "event=step phase=%s index=%zu token_id=%u step_ms=%.3f "
+                    "cpu_user_ms=%.3f cpu_sys_ms=%.3f rss_kb=%llu swap_kb=%llu "
+                    "vm_kb=%llu mem_available_kb=%llu swap_free_kb=%llu",
+                    progress_phase(event.phase), event.index, event.token_id,
+                    static_cast<double>(event.elapsed_ns) / 1'000'000.0,
+                    timeval_ms(usage.ru_utime), timeval_ms(usage.ru_stime),
+                    static_cast<unsigned long long>(rss_kb),
+                    static_cast<unsigned long long>(swap_kb),
+                    static_cast<unsigned long long>(vm_kb),
+                    static_cast<unsigned long long>(available_kb),
+                    static_cast<unsigned long long>(swap_free_kb));
+            };
+        __android_log_print(ANDROID_LOG_INFO, "PokitLMsAB",
+                            "event=generate_start arch=qwen35 max_tokens=%d prompt_chars=%zu",
+                            max_tokens, message.size());
+        const auto answer = engine->dense->generate_chat(message, max_tokens, &stats, progress);
+        __android_log_print(ANDROID_LOG_INFO, "PokitLMsAB",
+                            "event=generate_summary prompt_tokens=%zu generated_tokens=%zu "
+                            "decode_forward_tokens=%zu prefill_ms=%.3f decode_ms=%.3f "
+                            "first_token_id=%u has_token=%d",
+                            stats.prompt_tokens, stats.generated_tokens, stats.decode_forward_tokens,
+                            static_cast<double>(stats.prefill_time_ns) / 1'000'000.0,
+                            static_cast<double>(stats.decode_time_ns) / 1'000'000.0,
+                            stats.first_generated_token_id, stats.has_generated_token ? 1 : 0);
         return java_string(env, answer);
     } catch (const std::exception& e) {
         throw_java(env, "java/lang/RuntimeException", e.what());

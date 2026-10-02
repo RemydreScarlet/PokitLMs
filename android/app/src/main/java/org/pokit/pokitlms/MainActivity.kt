@@ -15,7 +15,7 @@ import android.widget.TextView
 class MainActivity : Activity() {
     private val native = NativeModelBridge()
     private val session = ModelSession(object : ModelSession.Backend {
-        override fun load(fd: Int) = native.load(fd)
+        override fun load(fd: Int) = native.load(fd, 3)
         override fun generate(handle: Long, prompt: String, maxTokens: Int) = native.generate(handle, prompt, maxTokens)
         override fun close(handle: Long) = native.close(handle)
     })

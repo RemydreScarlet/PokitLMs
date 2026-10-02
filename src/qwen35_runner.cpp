@@ -397,12 +397,15 @@ public:
     };
 
     Impl(std::filesystem::path path, std::size_t requested_context,
-         KvCachePrecision kv_precision)
+         KvCachePrecision kv_precision, std::size_t expert_io_threads)
         : model_path(std::move(path)), gguf(model_path),
           file(std::make_shared<storage::ModelFile>(model_path)), index(gguf), tokenizer(gguf),
           embedding_reader(file, index.token_embedding()), output_reader(file, index.output()),
           output_norm(load_vector(file, index.output_norm())) {
         const auto& config = index.config();
+        if (expert_io_threads == 0 || expert_io_threads > 4) {
+            throw std::invalid_argument("Qwen3.5 expert I/O threads must be between 1 and 4");
+        }
         model_context = as_size(config.context_length, "context_length");
         context_capacity = requested_context == 0 ? std::min<std::size_t>(model_context, 512)
                                                    : requested_context;
@@ -469,7 +472,7 @@ public:
 
         layers.reserve(index.layers().size());
         if (config.mixture_of_experts) {
-            expert_loader = std::make_unique<ExpertIoLoader>(3);
+            expert_loader = std::make_unique<ExpertIoLoader>(expert_io_threads);
             const auto layer_count = index.layers().size();
             if (layer_count > std::numeric_limits<std::size_t>::max() / 3U) {
                 throw std::invalid_argument("Qwen3.5 expert cache count overflows");
@@ -819,7 +822,14 @@ public:
 Qwen35Runner::Qwen35Runner(std::filesystem::path model_path,
                            std::size_t context_capacity,
                            KvCachePrecision kv_precision)
-    : impl_(std::make_unique<Impl>(std::move(model_path), context_capacity, kv_precision)) {}
+    : Qwen35Runner(std::move(model_path), context_capacity, kv_precision, 3) {}
+
+Qwen35Runner::Qwen35Runner(std::filesystem::path model_path,
+                           std::size_t context_capacity,
+                           KvCachePrecision kv_precision,
+                           std::size_t expert_io_threads)
+    : impl_(std::make_unique<Impl>(std::move(model_path), context_capacity, kv_precision,
+                                   expert_io_threads)) {}
 Qwen35Runner::~Qwen35Runner() = default;
 Qwen35Runner::Qwen35Runner(Qwen35Runner&&) noexcept = default;
 Qwen35Runner& Qwen35Runner::operator=(Qwen35Runner&&) noexcept = default;
@@ -833,7 +843,7 @@ std::vector<float> Qwen35Runner::forward_token(std::uint32_t token_id, std::uint
 
 std::vector<std::uint32_t> Qwen35Runner::generate_tokens(
     std::span<const std::uint32_t> prompt, std::size_t max_new_tokens,
-    Qwen35GenerationStats* stats) {
+    Qwen35GenerationStats* stats, const Qwen35ProgressCallback& progress) {
     if (!impl_) throw std::logic_error("Qwen3.5 runner has been moved from");
     if (stats) *stats = {};
     impl_->reset();
@@ -848,8 +858,15 @@ std::vector<std::uint32_t> Qwen35Runner::generate_tokens(
     std::vector<float> logits;
     const auto prefill_start = std::chrono::steady_clock::now();
     for (std::size_t i = 0; i < prompt.size(); ++i) {
+        const auto token_start = std::chrono::steady_clock::now();
         const bool last = i + 1 == prompt.size();
         impl_->forward_into(prompt[i], i, last, last ? &logits : nullptr);
+        const auto token_end = std::chrono::steady_clock::now();
+        if (progress) {
+            progress({Qwen35ProgressEvent::Phase::PrefillToken, i + 1, prompt[i],
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    token_end - token_start).count())});
+        }
     }
     const auto prefill_end = std::chrono::steady_clock::now();
     if (stats) {
@@ -865,6 +882,9 @@ std::vector<std::uint32_t> Qwen35Runner::generate_tokens(
         if (best == logits.end()) throw std::runtime_error("Qwen3.5 produced no vocabulary logits");
         const auto token = static_cast<std::uint32_t>(best - logits.begin());
         generated.push_back(token);
+        if (progress) {
+            progress({Qwen35ProgressEvent::Phase::GeneratedToken, generated.size(), token, 0});
+        }
         if (stats) {
             stats->generated_tokens = generated.size();
             if (i == 0) {
@@ -873,7 +893,15 @@ std::vector<std::uint32_t> Qwen35Runner::generate_tokens(
             }
         }
         if (token == impl_->tokenizer.eos_token_id() || i + 1 == max_new_tokens) break;
+        const auto forward_start = std::chrono::steady_clock::now();
         impl_->forward_into(token, prompt.size() + i, true, &logits);
+        const auto forward_end = std::chrono::steady_clock::now();
+        if (stats) ++stats->decode_forward_tokens;
+        if (progress) {
+            progress({Qwen35ProgressEvent::Phase::DecodeForward, generated.size(), token,
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    forward_end - forward_start).count())});
+        }
     }
     const auto decode_end = std::chrono::steady_clock::now();
     if (stats) {
@@ -885,11 +913,12 @@ std::vector<std::uint32_t> Qwen35Runner::generate_tokens(
 
 std::string Qwen35Runner::generate_text(std::string_view prompt,
                                        std::size_t max_new_tokens,
-                                       Qwen35GenerationStats* stats) {
+                                       Qwen35GenerationStats* stats,
+                                       const Qwen35ProgressCallback& progress) {
     if (!impl_) throw std::logic_error("Qwen3.5 runner has been moved from");
     const std::string text(prompt);
     const auto prompt_tokens = impl_->tokenizer.encode(text);
-    auto generated = generate_tokens(prompt_tokens, max_new_tokens, stats);
+    auto generated = generate_tokens(prompt_tokens, max_new_tokens, stats, progress);
     generated.erase(std::remove(generated.begin(), generated.end(), impl_->tokenizer.eos_token_id()),
                     generated.end());
     return impl_->tokenizer.decode(generated);
@@ -897,11 +926,12 @@ std::string Qwen35Runner::generate_text(std::string_view prompt,
 
 std::string Qwen35Runner::generate_chat(std::string_view user_message,
                                        std::size_t max_new_tokens,
-                                       Qwen35GenerationStats* stats) {
+                                       Qwen35GenerationStats* stats,
+                                       const Qwen35ProgressCallback& progress) {
     std::string prompt = "<|im_start|>user\n";
     prompt.append(user_message);
     prompt += "<|im_end|>\n<|im_start|>assistant\n";
-    return generate_text(prompt, max_new_tokens, stats);
+    return generate_text(prompt, max_new_tokens, stats, progress);
 }
 
 void Qwen35Runner::reset() { if (impl_) impl_->reset(); }
