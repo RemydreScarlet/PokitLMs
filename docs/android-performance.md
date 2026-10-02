@@ -18,6 +18,7 @@ The real-model test accepts the following instrumentation arguments:
 | `pokitlms.backend` | `cpu` | `cpu` or `vulkan`; Vulkan accelerates Qwen3.5 linear operations. |
 | `pokitlms.gpuTileMiB` | `4` | Capacity of each of the two GPU weight windows. |
 | `pokitlms.gpuMode` | `subgroup` | `subgroup` or `workgroup` reduction. |
+| `pokitlms.gpuWeightMemory` | `auto` | `auto`, `local`, or `cached`; automatic mode prefers cached mapped memory on discrete NVIDIA GPUs. |
 | `pokitlms.gpuVectorizedQ4` | `true` | Enable packed Q4_K/Q5_K subgroup shader path; set `false` for A/B. |
 | `pokitlms.prompt` | `hi` | User message passed to the model's chat template. |
 | `pokitlms.expectedReply` | unset | Optional exact reply assertion. |
@@ -324,6 +325,45 @@ Captured host logs are retained under
 `$HOME/.local/share/pokitlms-tools/logs/` as
 `qwen35-2b-vulkan-baseline-8tok-captured-20261003.log` and
 `qwen35-2b-vulkan-factor-8tok-captured-20261003.log`.
+
+### Model-scale Vulkan weight-memory A/B on NVIDIA
+
+The Qwen3.5 benchmark now compares `local` mapped buffers with `cached`
+host-visible buffers. On the RTX 2070 SUPER, these selected Vulkan memory
+flags `7` and `14`, respectively. Two runs per mode used 4 MiB windows and
+the same prompts. The 2B run generated eight tokens from a 16-token prompt;
+all four runs produced the same token IDs. The 9B `hi` run generated two
+tokens and measured one decode forward per run; each pair produced the same
+IDs (`248068,271`).
+
+| Model / memory mode | Mean prefill / decode (s) | Mean decode forwards/s | Cumulative `read_ms` / `gpu_ms` (s) | Physical reads per run |
+| --- | ---: | ---: | ---: | ---: |
+| 2B, local | 32.94 / 26.73 | 0.2619 | 55.01 / 2.78 | 0 bytes |
+| 2B, cached | 15.02 / 9.185 | 0.7621 | 3.20 / 21.50 | 0 bytes |
+| 9B, local | 126.03 / 16.918 | 0.05911 | 139.03 / 6.42 | 21.5–35.5 GB |
+| 9B, cached | 80.68 / 10.271 | 0.09736 | 79.96 / 41.06 | about 35.5 GB |
+
+Cached memory raised the GPU timestamp but cut cumulative staging/read time
+and improved measured decode throughput by 2.9x on 2B and 1.65x on 9B. This
+points to CPU writes into uncached BAR memory as a major cost on this NVIDIA
+path; cached system memory is faster to fill even though GPU reads from it
+take longer. Physical reads varied with page-cache state and were not reduced
+by the memory mode. `read_ms`, `gpu_ms`, and fence waits overlap, so the
+counters cannot be added to obtain wall time.
+
+Automatic mode now prefers host-cached buffers on discrete NVIDIA GPUs and
+retains the prior preference elsewhere. Existing Pixel 9a runs reported
+Mali-G715 memory flags `11`; the device selection is therefore kept on its
+prior automatic path. The Android instrumentation override
+`pokitlms.gpuWeightMemory=auto|local|cached` is compiled, but no new model
+inference was run on the phone while swap remained constrained. The bounded
+35B-A3B probe under automatic mode selected flags `14` and passed 514 matrices
+and 1,542 slices, with maximum absolute errors below `3e-6`; it did not run
+35B generation.
+
+Raw A/B logs are in `$HOME/.local/share/pokitlms-tools/logs/` under
+`qwen35-2b-memory-{local,cached}*-20261003.log` and
+`qwen35-9b-memory-{local,cached}*-20261003.log`.
 
 ### Numerical checks
 

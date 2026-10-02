@@ -112,13 +112,14 @@ void log_process_telemetry(const ProcessTelemetry& snapshot) {
 void usage(const char* executable) {
     std::cerr << "Usage: " << executable
               << " MODEL.gguf USER_MESSAGE [new_tokens=32] [kv_window=0] [kv_precision=fp16|q8] [io_threads=3]"
-              << " [backend=cpu|vulkan] [gpu_tile_mib=16] [gpu_device=auto] [gpu_mode=subgroup|workgroup]\n";
+              << " [backend=cpu|vulkan] [gpu_tile_mib=16] [gpu_device=auto] [gpu_mode=subgroup|workgroup]"
+              << " [gpu_weight_memory=auto|local|cached]\n";
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3 || argc > 11) {
+    if (argc < 3 || argc > 12) {
         usage(argv[0]);
         return 2;
     }
@@ -149,6 +150,9 @@ int main(int argc, char** argv) {
         const std::string_view mode = argc > 10 ? argv[10] : "subgroup";
         if (mode != "subgroup" && mode != "workgroup")
             throw std::invalid_argument("GPU mode must be subgroup or workgroup");
+        const std::string_view weight_memory = argc > 11 ? argv[11] : "auto";
+        if (weight_memory != "auto" && weight_memory != "local" && weight_memory != "cached")
+            throw std::invalid_argument("GPU weight memory must be auto, local, or cached");
 
         const auto load_start = std::chrono::steady_clock::now();
         pokitlms::model::Qwen35Runner runner(argv[1], kv_window, kv_precision, io_threads);
@@ -159,10 +163,15 @@ int main(int argc, char** argv) {
             options.tile_bytes = tile_mib * 1024U * 1024U;
             options.device_index = device_index;
             options.use_subgroups = mode == "subgroup";
+            if (weight_memory == "local")
+                options.weight_memory_mode = pokitlms::gpu::VulkanWeightMemoryMode::Local;
+            else if (weight_memory == "cached")
+                options.weight_memory_mode = pokitlms::gpu::VulkanWeightMemoryMode::Cached;
             vulkan = std::make_shared<pokitlms::gpu::VulkanLinearBackend>(options);
             runner.set_linear_backend(vulkan);
             std::cerr << "gpu_device=" << vulkan->device_name() << '\n'
                       << "gpu_tile_bytes=" << options.tile_bytes << '\n'
+                      << "gpu_weight_memory_mode=" << weight_memory << '\n'
                       << "gpu_weight_memory_flags=" << vulkan->stats().weight_memory_flags << '\n';
         }
 #else

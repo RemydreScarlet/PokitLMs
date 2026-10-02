@@ -53,20 +53,25 @@ pokitlms::model::TensorInfo view(const pokitlms::model::TensorInfo& tensor,
 // constructs a model runner, uploads a whole model, or starts generation.
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 4) {
-        std::cerr << "Usage: " << argv[0] << " MODEL.gguf [timing_tensor=blk.0.ffn_gate.weight] [weights=device|cached]\n";
+        std::cerr << "Usage: " << argv[0] << " MODEL.gguf [timing_tensor=blk.0.ffn_gate.weight] [weights=auto|local|cached]\n";
         return 2;
     }
     try {
         pokitlms::model::GgufReader gguf(argv[1]);
         auto file = std::make_shared<pokitlms::storage::ModelFile>(argv[1]);
         pokitlms::gpu::VulkanLinearOptions options;
-        if (argc > 3) {
-            const std::string_view memory(argv[3]);
-            if (memory != "device" && memory != "cached") throw std::invalid_argument("weights must be device or cached");
-            options.prefer_host_cached_weights = memory == "cached";
+        std::string_view memory = argc > 3 ? argv[3] : "auto";
+        if (memory == "device") memory = "local";
+        if (memory != "auto" && memory != "local" && memory != "cached")
+            throw std::invalid_argument("weights must be auto, local, or cached");
+        if (memory == "local") {
+            options.weight_memory_mode = pokitlms::gpu::VulkanWeightMemoryMode::Local;
+        } else if (memory == "cached") {
+            options.weight_memory_mode = pokitlms::gpu::VulkanWeightMemoryMode::Cached;
         }
         pokitlms::gpu::VulkanLinearBackend backend(options);
         std::cout << "device=" << backend.device_name()
+                  << " weight_memory_mode=" << memory
                   << " weight_memory_flags=" << backend.stats().weight_memory_flags << '\n';
         std::map<std::uint32_t, double> errors;
         std::size_t matrices = 0, samples = 0;

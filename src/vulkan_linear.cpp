@@ -188,9 +188,23 @@ public:
         vkGetDeviceQueue(device, queue_family, 0, &queue);
         tile_bytes = std::min<VkDeviceSize>(options.tile_bytes,
             properties.limits.maxStorageBufferRange - 4) & ~VkDeviceSize(3);
+        bool prefer_cached_weights = false;
+        switch (options.weight_memory_mode) {
+            case VulkanWeightMemoryMode::Automatic:
+                prefer_cached_weights = properties.vendorID == 0x10de &&
+                    properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+                break;
+            case VulkanWeightMemoryMode::Local:
+                break;
+            case VulkanWeightMemoryMode::Cached:
+                prefer_cached_weights = true;
+                break;
+            default:
+                throw std::invalid_argument("invalid Vulkan weight memory mode");
+        }
         // Spare bytes allow a uint load containing a final halfword.
         for (auto& buffer : weights) {
-            ensure_buffer(buffer, tile_bytes + 4, options.prefer_host_cached_weights);
+            ensure_buffer(buffer, tile_bytes + 4, prefer_cached_weights);
             counters.allocated_bytes += buffer.allocation;
         }
         counters.weight_memory_flags = weights[0].flags;

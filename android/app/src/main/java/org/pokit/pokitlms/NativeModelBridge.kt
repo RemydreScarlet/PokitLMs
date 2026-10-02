@@ -5,7 +5,7 @@ internal class NativeModelBridge {
     external fun load(
         fd: Int, ioThreads: Int, useVulkan: Boolean = false,
         gpuTileMiB: Int = 4, gpuSubgroups: Boolean = true,
-        gpuVectorizedQ4: Boolean = true
+        gpuVectorizedQ4: Boolean = true, gpuWeightMemoryMode: Int = 0
     ): Long
     external fun generate(handle: Long, prompt: String, maxTokens: Int): String
     external fun close(handle: Long)

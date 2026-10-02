@@ -9,15 +9,22 @@
 
 namespace pokitlms::gpu {
 
+enum class VulkanWeightMemoryMode : std::uint32_t {
+    Automatic = 0,
+    Local = 1,
+    Cached = 2,
+};
+
 struct VulkanLinearOptions {
     // Two mapped weight windows are allocated. The complete model is never
     // uploaded: positioned reads into the next window overlap GPU execution.
     std::size_t tile_bytes = 16U * 1024U * 1024U;
     std::uint32_t device_index = std::numeric_limits<std::uint32_t>::max();
     bool use_subgroups = true;
-    // Diagnostic comparison for discrete GPUs: cached system memory versus
-    // mapped device memory. Integrated GPUs normally have cached local memory.
-    bool prefer_host_cached_weights = false;
+    // Automatic prefers cached host-visible memory on discrete NVIDIA GPUs
+    // and retains the device-local preference elsewhere. Explicit modes allow
+    // model-scale comparisons on a particular device.
+    VulkanWeightMemoryMode weight_memory_mode = VulkanWeightMemoryMode::Automatic;
     // Q4_K/Q5_K packed loads can share an SSBO word between four quant bytes.
     // Disable to retain the scalar-byte path for device-specific comparisons.
     bool use_vectorized_q4_k = true;

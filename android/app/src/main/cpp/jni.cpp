@@ -24,7 +24,8 @@ namespace {
 struct Engine {
     Engine(const std::string& path, std::size_t expert_io_threads, bool use_vulkan,
            [[maybe_unused]] std::size_t gpu_tile_mib, [[maybe_unused]] bool gpu_subgroups,
-           [[maybe_unused]] bool gpu_vectorized_q4) {
+           [[maybe_unused]] bool gpu_vectorized_q4,
+           [[maybe_unused]] int gpu_weight_memory_mode) {
         pokitlms::model::GgufReader gguf(path);
         const auto it = gguf.metadata().find("general.architecture");
         if (it == gguf.metadata().end() || !std::holds_alternative<std::string>(it->second.value))
@@ -44,11 +45,14 @@ struct Engine {
             options.tile_bytes = gpu_tile_mib * 1024U * 1024U;
             options.use_subgroups = gpu_subgroups;
             options.use_vectorized_q4_k = gpu_vectorized_q4;
+            options.weight_memory_mode = static_cast<pokitlms::gpu::VulkanWeightMemoryMode>(
+                gpu_weight_memory_mode);
             vulkan = std::make_shared<pokitlms::gpu::VulkanLinearBackend>(options);
             dense->set_linear_backend(vulkan);
             __android_log_print(ANDROID_LOG_INFO, "PokitLMsAB",
-                "event=backend_init backend=vulkan device=%s tile_bytes=%zu weight_memory_flags=%u",
-                vulkan->device_name().c_str(), options.tile_bytes, vulkan->stats().weight_memory_flags);
+                "event=backend_init backend=vulkan device=%s tile_bytes=%zu weight_memory_mode=%d weight_memory_flags=%u",
+                vulkan->device_name().c_str(), options.tile_bytes, gpu_weight_memory_mode,
+                vulkan->stats().weight_memory_flags);
 #else
             throw std::runtime_error("Vulkan support was not compiled into this build");
 #endif
@@ -160,17 +164,20 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_org_pokit_pokitlms_NativeModelBridge_load(JNIEnv* env, jobject, jint fd,
                                                jint expert_io_threads, jboolean use_vulkan,
                                                jint gpu_tile_mib, jboolean gpu_subgroups,
-                                               jboolean gpu_vectorized_q4) {
+                                               jboolean gpu_vectorized_q4,
+                                               jint gpu_weight_memory_mode) {
     try {
         if (expert_io_threads < 1 || expert_io_threads > 4)
             throw std::invalid_argument("expert I/O threads must be between 1 and 4");
         if (gpu_tile_mib < 1 || gpu_tile_mib > 128)
             throw std::invalid_argument("GPU tile MiB must be between 1 and 128");
+        if (gpu_weight_memory_mode < 0 || gpu_weight_memory_mode > 2)
+            throw std::invalid_argument("GPU weight memory mode must be auto, local, or cached");
         const std::string path = "/proc/self/fd/" + std::to_string(fd);
         return reinterpret_cast<jlong>(new Engine(path,
             static_cast<std::size_t>(expert_io_threads), use_vulkan == JNI_TRUE,
             static_cast<std::size_t>(gpu_tile_mib), gpu_subgroups == JNI_TRUE,
-            gpu_vectorized_q4 == JNI_TRUE));
+            gpu_vectorized_q4 == JNI_TRUE, static_cast<int>(gpu_weight_memory_mode)));
     } catch (const std::exception& e) {
         throw_java(env, "java/lang/IllegalArgumentException", e.what());
         return 0;
