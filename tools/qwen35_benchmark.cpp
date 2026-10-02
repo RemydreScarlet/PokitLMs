@@ -113,13 +113,13 @@ void usage(const char* executable) {
     std::cerr << "Usage: " << executable
               << " MODEL.gguf USER_MESSAGE [new_tokens=32] [kv_window=0] [kv_precision=fp16|q8] [io_threads=3]"
               << " [backend=cpu|vulkan] [gpu_tile_mib=16] [gpu_device=auto] [gpu_mode=subgroup|workgroup]"
-              << " [gpu_weight_memory=auto|local|cached]\n";
+              << " [gpu_weight_memory=auto|local|cached] [gpu_model_cache=auto|off]\n";
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3 || argc > 12) {
+    if (argc < 3 || argc > 13) {
         usage(argv[0]);
         return 2;
     }
@@ -153,6 +153,9 @@ int main(int argc, char** argv) {
         const std::string_view weight_memory = argc > 11 ? argv[11] : "auto";
         if (weight_memory != "auto" && weight_memory != "local" && weight_memory != "cached")
             throw std::invalid_argument("GPU weight memory must be auto, local, or cached");
+        const std::string_view model_cache = argc > 12 ? argv[12] : "auto";
+        if (model_cache != "auto" && model_cache != "off")
+            throw std::invalid_argument("GPU model cache must be auto or off");
 
         const auto load_start = std::chrono::steady_clock::now();
         pokitlms::model::Qwen35Runner runner(argv[1], kv_window, kv_precision, io_threads);
@@ -163,6 +166,8 @@ int main(int argc, char** argv) {
             options.tile_bytes = tile_mib * 1024U * 1024U;
             options.device_index = device_index;
             options.use_subgroups = mode == "subgroup";
+            if (model_cache == "off")
+                options.model_cache_mode = pokitlms::gpu::VulkanModelCacheMode::Disabled;
             if (weight_memory == "local")
                 options.weight_memory_mode = pokitlms::gpu::VulkanWeightMemoryMode::Local;
             else if (weight_memory == "cached")
@@ -172,6 +177,7 @@ int main(int argc, char** argv) {
             std::cerr << "gpu_device=" << vulkan->device_name() << '\n'
                       << "gpu_tile_bytes=" << options.tile_bytes << '\n'
                       << "gpu_weight_memory_mode=" << weight_memory << '\n'
+                      << "gpu_model_cache_mode=" << model_cache << '\n'
                       << "gpu_weight_memory_flags=" << vulkan->stats().weight_memory_flags << '\n';
         }
 #else
@@ -212,6 +218,9 @@ int main(int argc, char** argv) {
                           << " gpu_ms=" << milliseconds(gpu.gpu_time_ns)
                           << " pipeline_ms=" << milliseconds(gpu.pipeline_time_ns)
                           << " cache_ms=" << milliseconds(gpu.cache_time_ns)
+                          << " model_cache_active=" << gpu.model_cache_active
+                          << " model_cache_uploaded_bytes=" << gpu.model_cache_uploaded_bytes
+                          << " model_cache_upload_ms=" << milliseconds(gpu.model_cache_upload_time_ns)
                           << " allocated_bytes=" << gpu.allocated_bytes << '\n';
             }
 #endif
@@ -219,11 +228,29 @@ int main(int argc, char** argv) {
 #if defined(__linux__)
         const auto telemetry_before = process_telemetry();
 #endif
-        const auto response = runner.generate_chat(argv[2], max_new_tokens, &stats, progress);
+        std::string response;
+        try {
+            response = runner.generate_chat(argv[2], max_new_tokens, &stats, progress);
+        } catch (...) {
+#ifdef POKITLMS_USE_VULKAN
+            if (vulkan) {
+                const auto gpu = vulkan->stats();
+                std::cerr << "gpu_error_state model_cache_active=" << gpu.model_cache_active
+                          << " model_cache_capacity_bytes=" << gpu.model_cache_capacity_bytes
+                          << " model_cache_uploaded_bytes=" << gpu.model_cache_uploaded_bytes
+                          << " model_cache_upload_ms=" << milliseconds(gpu.model_cache_upload_time_ns)
+                          << " calls=" << gpu.linear_calls << " dispatches=" << gpu.dispatches << '\n';
+            }
+#endif
+            throw;
+        }
 #if defined(__linux__)
         const auto telemetry_after = process_telemetry();
 #endif
         const auto expert_cache = runner.expert_cache_stats();
+#ifdef POKITLMS_USE_VULKAN
+        const auto gpu_stats = vulkan ? vulkan->stats() : pokitlms::gpu::VulkanLinearStats{};
+#endif
         std::cout << response << '\n';
         std::cerr << "model_load_ms=" << milliseconds(load_ns) << '\n'
                   << "generated_tokens=" << stats.generated_tokens << '\n'
@@ -248,6 +275,14 @@ int main(int argc, char** argv) {
                   << "expert_read_ms=" << milliseconds(expert_cache.read_time_ns) << '\n'
                   << "expert_cache_hits=" << expert_cache.hits << '\n'
                   << "expert_cache_misses=" << expert_cache.misses << '\n';
+#ifdef POKITLMS_USE_VULKAN
+        if (vulkan) {
+            std::cerr << "gpu_model_cache_active=" << gpu_stats.model_cache_active << '\n'
+                      << "gpu_model_cache_capacity_bytes=" << gpu_stats.model_cache_capacity_bytes << '\n'
+                      << "gpu_model_cache_uploaded_bytes=" << gpu_stats.model_cache_uploaded_bytes << '\n'
+                      << "gpu_model_cache_upload_ms=" << milliseconds(gpu_stats.model_cache_upload_time_ns) << '\n';
+        }
+#endif
 #if defined(__linux__)
         // Process storage I/O is distinct from requested model bytes: cache hits
         // increase rchar without requiring a physical storage read.

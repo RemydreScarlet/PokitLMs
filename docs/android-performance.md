@@ -110,6 +110,16 @@ so this is numerical parity rather than a bitwise guarantee. The Android
 bridge uses 4 MiB per window by default based on the Pixel 9a A/B results
 below; the generic C++ backend retains its 16 MiB default.
 
+The Vulkan backend also has an automatic whole-model cache. If
+`VK_EXT_memory_budget` reports enough device-local budget, it uploads the
+complete GGUF once and serves tensor reads from that allocation; the two
+windows remain the fallback for larger files or unavailable budget data.
+Automatic mode keeps at least 1 GiB free on discrete GPUs. On integrated
+GPUs, it keeps a 2 GiB device-memory reserve and requires `/proc/meminfo` to
+report at least the model size plus that reserve as `MemAvailable`. This extra
+check avoids filling unified memory when the host is already under pressure.
+The benchmark accepts `gpu_model_cache=auto|off`, while Android uses `auto`.
+
 The host CMake option is `POKITLMS_USE_VULKAN=ON`, with Python 3, Vulkan
 headers/loader, and `glslc` required. Android Gradle builds enable Vulkan and
 find the NDK's host shader compiler. The C++ API installs a shared
@@ -248,9 +258,11 @@ averaging about 4.9 GB per forward. Nearly all repeated reads reached storage
 instead of being served from cache. Vulkan `read_ms` averaged 105.6-106.8
 seconds; it includes copying from the file/page cache into mapped Vulkan
 memory and overlaps other work. The process RSS stayed around 0.3 GiB, with
-roughly 1.4-1.5 GiB system `MemAvailable`. Repeated weight delivery is the
-dominant measured cost; the double buffer avoids loading the full model into
-memory but cannot retain weights between forwards.
+roughly 1.4-1.5 GiB system `MemAvailable`. In these streaming runs, repeated
+weight delivery was the dominant measured cost; the double buffer avoided
+loading the full model into memory but could not retain weights between
+forwards. The later whole-model cache A/B below measures the alternative for
+models that fit the reported Vulkan budget.
 
 An additional host Vulkan cache-state comparison used the same 9B file,
 `hi` prompt, GTX 1080, 4 MiB windows, subgroup size 32, and device-local mapped
@@ -304,22 +316,20 @@ reported `read_ms` still reached about 56 seconds because it includes fetching
 cached file pages and copying each row tile into Vulkan's mapped weight
 buffers; that counter also overlaps GPU work and fence waits.
 
-The runner deliberately keeps only two 4 MiB Vulkan weight windows instead of
-duplicating the full model in RAM or GPU memory. Each linear layer reads its
-weight rows from the model file with `pread`, copies them into one of those
-windows, and dispatches the shader. The next generated token uses those
-weights again, so the same rows are read and copied repeatedly. This bounds
-resident memory but makes weight delivery expensive. On the Pixel 9a 9B run,
-the 6.17 GB model's working set was not retained by the page cache, resulting
-in about 77 GB of physical reads across the prompt and decode forwards. The
-2B run was only done on the host: at the time of the device check, the phone
-had about 366 MiB free RAM and 657 MiB free swap, so a full-model run was not
-safe to start. A later check showed about 938 MiB `MemAvailable` and 665 MiB
-`SwapFree`. During an attempt to stage the model in the app's private files,
-`SwapFree` reached 0; the transfer was stopped after about 838 MiB and the
-partial model file was deleted. After cleanup, `MemAvailable` was about
-1.42 GiB and `SwapFree` about 58 MiB. No 2B inference was started on the
-phone.
+When a model does not fit the Vulkan budget, the runner uses only two 4 MiB
+weight windows. Each linear layer reads rows from the model file with
+`pread`, copies them into a window, and dispatches the shader; the next token
+reads those rows again. This bounds GPU residency but can make weight delivery
+expensive. On the Pixel 9a 9B run, the 6.17 GB working set was not retained by
+the page cache, resulting in about 77 GB of physical reads across the prompt
+and decode forwards. The 2B model fits the host RTX 2070 SUPER cache, but the
+phone's memory state did not pass the integrated-GPU cache gate: at the time
+of the device check it had about 366 MiB free RAM and 657 MiB free swap. A
+later check showed about 938 MiB `MemAvailable` and 665 MiB `SwapFree`. During
+an attempt to stage the model in the app's private files, `SwapFree` reached
+0; the transfer was stopped after about 838 MiB and the partial model file
+was deleted. After cleanup, `MemAvailable` was about 1.42 GiB and `SwapFree`
+about 58 MiB. No 2B inference was run on the phone.
 
 Captured host logs are retained under
 `$HOME/.local/share/pokitlms-tools/logs/` as
@@ -364,6 +374,47 @@ and 1,542 slices, with maximum absolute errors below `3e-6`; it did not run
 Raw A/B logs are in `$HOME/.local/share/pokitlms-tools/logs/` under
 `qwen35-2b-memory-{local,cached}*-20261003.log` and
 `qwen35-9b-memory-{local,cached}*-20261003.log`.
+
+### Whole-model Vulkan cache A/B on Qwen3.5-2B
+
+On 2026-10-03, the same 2B Q4_K_M model and prompt
+(`Reply with exactly the word OK.`) were run on the RTX 2070 SUPER with the
+whole-model cache enabled and disabled. Both requested up to 8 tokens, but
+the model stopped after 6 at EOS. Both GPU runs returned `OK` and the same
+token IDs, also matching a CPU run:
+`248068,271,248069,271,3793,248046`.
+
+| Vulkan mode | Prefill (s) | Decode, 5 forwards (s) | Decode forwards/s | Logical model bytes read | Vulkan allocation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Whole-model cache (`auto`) | 4.095 | 0.280 | 17.83 | 1.396 GB | 1.431 GB |
+| Two-window streaming (`off`) | 14.819 | 6.786 | 0.737 | 20.527 GB | 34.6 MB |
+
+The resident run uploaded the 1.396 GB GGUF in 3.319 seconds. Including that
+first upload, its prefill plus decode time was 4.375 seconds versus 21.605
+seconds in streaming mode. Decode throughput was 24.2 times higher for this
+prompt. The resident run recorded 1.422 GB of physical reads during the
+upload; the later streaming run recorded zero after the model pages were
+warmed. This run order does not establish lower physical disk traffic. It
+does show fewer repeated logical reads and less host-to-GPU staging. The
+resident allocation trades about 1.4 GB of GPU memory for the speedup. The
+phone was not tested; its available memory was below the integrated-GPU cache
+threshold.
+
+The CPU run produced the same six token IDs and reply (`OK`) at 2.228 decode
+tokens/s. Its logical model reads totaled 20.527 GB. The full outputs and
+telemetry are retained in `qwen35-2b-{vulkan-resident-cache-8tok,cpu-parity-8tok,vulkan-cache-off-8tok}-20261003.log`.
+
+### Whole-model Vulkan cache run on Qwen3.5-9B
+
+The RTX 2070 SUPER also completed one 8-token Qwen3.5-9B Q4_K_M run with
+whole-model caching. The cache held the 6,169,341,984-byte GGUF in a
+6,169,341,984-byte Vulkan allocation, uploaded in 11.500 seconds. Prefill
+took 13.161 seconds; seven decode forwards took 1.280 seconds (5.468
+tokens/s). It produced the same token IDs as the earlier CPU/Vulkan checks:
+`248068,271,248069,271,9419,0,2500,628`. The process recorded 6.169 GB of
+logical model reads and 5.044 GB of physical reads during this run. This is
+one cached run, so it does not establish a paired 9B speedup. The 35B model
+was not run through generation.
 
 ### Numerical checks
 

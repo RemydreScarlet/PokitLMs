@@ -96,6 +96,9 @@ TensorReader::TensorReader(TensorInfo tensor,
 const TensorInfo& TensorReader::tensor() const noexcept { return tensor_; }
 std::uint64_t TensorReader::row_count() const noexcept { return row_count_; }
 std::size_t TensorReader::row_bytes() const noexcept { return row_bytes_; }
+const std::shared_ptr<storage::ModelFile>& TensorReader::model_file() const noexcept {
+    return file_;
+}
 
 void TensorReader::read_rows_into(std::uint64_t first_row, std::size_t rows,
                                   std::span<std::byte> destination) const {

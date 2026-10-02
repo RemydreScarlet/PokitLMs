@@ -20,6 +20,7 @@ public:
     [[nodiscard]] const TensorInfo& tensor() const noexcept;
     [[nodiscard]] std::uint64_t row_count() const noexcept;
     [[nodiscard]] std::size_t row_bytes() const noexcept;
+    [[nodiscard]] const std::shared_ptr<storage::ModelFile>& model_file() const noexcept;
     void read_rows_into(std::uint64_t first_row, std::size_t row_count,
                         std::span<std::byte> destination) const;
     [[nodiscard]] std::vector<std::byte> read_rows(std::uint64_t first_row,

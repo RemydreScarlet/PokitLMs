@@ -3,9 +3,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <stdexcept>
 
@@ -49,11 +52,12 @@ pokitlms::model::TensorInfo view(const pokitlms::model::TensorInfo& tensor,
 }
 }  // namespace
 
-// Reads bounded slices and one repeatedly warmed matrix window. It never
-// constructs a model runner, uploads a whole model, or starts generation.
+// Reads bounded slices and one repeatedly warmed matrix window by default.
+// Whole-model residency is opt-in for diagnosing its exact matrix path.
 int main(int argc, char** argv) {
-    if (argc < 2 || argc > 4) {
-        std::cerr << "Usage: " << argv[0] << " MODEL.gguf [timing_tensor=blk.0.ffn_gate.weight] [weights=auto|local|cached]\n";
+    if (argc < 2 || argc > 6) {
+        std::cerr << "Usage: " << argv[0] << " MODEL.gguf [timing_tensor=blk.0.ffn_gate.weight]"
+                  << " [weights=auto|local|cached] [model_cache=off|auto|full] [gpu_device=auto|N]\n";
         return 2;
     }
     try {
@@ -69,9 +73,23 @@ int main(int argc, char** argv) {
         } else if (memory == "cached") {
             options.weight_memory_mode = pokitlms::gpu::VulkanWeightMemoryMode::Cached;
         }
+        std::string_view model_cache = argc > 4 ? argv[4] : "off";
+        if (model_cache != "off" && model_cache != "auto" && model_cache != "full")
+            throw std::invalid_argument("model_cache must be off, auto, or full");
+        if (model_cache == "off")
+            options.model_cache_mode = pokitlms::gpu::VulkanModelCacheMode::Disabled;
+        std::string_view device = argc > 5 ? argv[5] : "auto";
+        if (device != "auto") {
+            std::uint32_t index{};
+            const auto [end, error] = std::from_chars(device.data(), device.data() + device.size(), index);
+            if (error != std::errc{} || end != device.data() + device.size())
+                throw std::invalid_argument("gpu_device must be auto or a zero-based index");
+            options.device_index = index;
+        }
         pokitlms::gpu::VulkanLinearBackend backend(options);
         std::cout << "device=" << backend.device_name()
                   << " weight_memory_mode=" << memory
+                  << " model_cache_mode=" << model_cache
                   << " weight_memory_flags=" << backend.stats().weight_memory_flags << '\n';
         std::map<std::uint32_t, double> errors;
         std::size_t matrices = 0, samples = 0;
@@ -105,8 +123,12 @@ int main(int argc, char** argv) {
         const auto* tensor = gguf.find_tensor(argc > 2 ? argv[2] : "blk.0.ffn_gate.weight");
         if (!tensor) throw std::runtime_error("timing tensor not found");
         pokitlms::model::TensorReader original(file, *tensor);
-        const auto rows = std::min<std::size_t>({2048, original.row_count(),
-                                               8U * 1024U * 1024U / original.row_bytes()});
+        const bool full_tensor = model_cache == "full";
+        if (full_tensor && original.row_count() > 16384)
+            throw std::runtime_error("full-tensor probe is limited to 16384 output rows");
+        const auto rows = full_tensor ? static_cast<std::size_t>(original.row_count())
+            : std::min<std::size_t>({2048, original.row_count(),
+                                     8U * 1024U * 1024U / original.row_bytes()});
         if (!rows) throw std::runtime_error("timing row exceeds window limit");
         auto slice = view(*tensor, 0, rows, original.row_bytes());
         pokitlms::model::TensorReader reader(file, slice);
@@ -114,7 +136,7 @@ int main(int argc, char** argv) {
         auto input = input_for(tensor->dimensions.front());
         std::vector<float> cpu(rows), gpu(rows);
         reader.read_rows_into(0, rows, window); // Warm only this bounded region.
-        constexpr unsigned repeats = 8;
+        const unsigned repeats = full_tensor ? 1U : 8U;
         auto disk_before = physical_read_bytes();
         auto start = Clock::now();
         for (unsigned i = 0; i < repeats; ++i) reader.read_rows_into(0, rows, window);
@@ -126,7 +148,7 @@ int main(int argc, char** argv) {
         pokitlms::model::TensorReader resident(slice, payload);
         pokitlms::model::tensor_linear(resident, input, cpu);
         if (!backend.try_linear(reader, input, gpu)) throw std::runtime_error("timing type unsupported");
-        compare(cpu, gpu);
+        const auto timing_error = compare(cpu, gpu);
         const auto before = backend.stats();
         disk_before = physical_read_bytes();
         start = Clock::now();
@@ -141,6 +163,11 @@ int main(int argc, char** argv) {
                   << " gpu_compute_ms=" << (after.gpu_time_ns - before.gpu_time_ns) / 1e6
                   << " gpu_wait_ms=" << (after.wait_time_ns - before.wait_time_ns) / 1e6
                   << " gpu_cache_ms=" << (after.cache_time_ns - before.cache_time_ns) / 1e6
+                  << " model_cache_active=" << after.model_cache_active
+                  << " model_cache_uploaded_bytes=" << after.model_cache_uploaded_bytes
+                  << " model_cache_upload_ms=" << after.model_cache_upload_time_ns / 1e6
+                  << " timing_matrix_max_abs_error=" << timing_error
+                  << " full_tensor=" << full_tensor
                   << " total_ms=" << total_ms
                   << " physical_read_bytes=" << physical_read_bytes() - disk_before << '\n';
         return 0;

@@ -4,7 +4,7 @@ PokitLMs is a native, mobile-first LLM inference backend and Android app in C++2
 
 ## Direction
 
-The first target is a focused inference backend for memory-constrained ARM64 devices, with CPU kernels and optional Vulkan compute shaders, and Mixture-of-Experts models as the primary use case. Model weights should be read from storage on demand, routed experts should use a bounded cache, and storage I/O should be measurable separately from compute. Correctness comes first: storage and cache policies must preserve the same weight bytes and model math.
+The first target is a focused inference backend for memory-constrained ARM64 devices, with CPU kernels and optional Vulkan compute shaders, and Mixture-of-Experts models as the primary use case. Model weights should be read from storage on demand or retained on the GPU only when the reported budget allows it; routed experts should use a bounded cache, and storage I/O should be measurable separately from compute. Correctness comes first: storage and cache policies must preserve the same weight bytes and model math.
 
 The design takes inspiration from:
 
@@ -22,7 +22,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - Expert loads request best-effort OS page-cache eviction after copying into the bounded expert cache, avoiding a second cached copy of routed weights.
 - Shared random-access model file and GGUF tensor row reader; F32/F16/BF16 rows can be converted without loading a full tensor.
 - Disk-backed GGUF matrix-vector dispatch in bounded row batches for F32/F16/BF16, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, and Q8_0.
-- Optional native Vulkan matrix-vector backend for dense and MoE Qwen3.5: F32, F16, BF16, Q4_0, Q4_1, Q8_0, Q4_K, Q5_K, and Q6_K. Unsupported formats use the existing CPU kernels. Two mapped weight windows (16 MiB each by default) overlap positioned reads with GPU computation; the complete model is not uploaded. Activations and accumulation remain FP32. Reduction order can differ from CPU arithmetic, so parity is checked with numerical tolerances and generated token comparisons.
+- Optional native Vulkan matrix-vector backend for dense and MoE Qwen3.5: F32, F16, BF16, Q4_0, Q4_1, Q8_0, Q4_K, Q5_K, and Q6_K. Unsupported formats use the existing CPU kernels. Two mapped weight windows (16 MiB each by default) stream models that do not fit; automatic mode can retain a fitting GGUF in device-local memory when Vulkan reports enough budget. It keeps a 1 GiB reserve on discrete GPUs; integrated GPUs require a 2 GiB device reserve and matching host `MemAvailable` headroom. Activations and accumulation remain FP32. Reduction order can differ from CPU arithmetic, so parity is checked with numerical tolerances and generated token comparisons.
 - Automatically sizes matrix row reads around a 256 KiB temporary weight window to reduce small storage reads.
 - AArch64 NEON dot-product and weighted-accumulation paths for dense F32, quantized blocks, and grouped-query attention; scalar fallback remains portable.
 - Single-token Qwen3-MoE decode path with per-layer GQA KV state, Q/K RMSNorm, RoPE, top-k routing, and cached on-demand expert execution.
@@ -33,8 +33,8 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - GGUF v3 metadata/tensor-directory reader with known-format payload extent validation; payloads remain file-backed.
 - Expert tensor splitting by the GGUF last dimension, ready to feed routed slices into the bounded store.
 - Validated GGUF architecture parameters and tensor index for Qwen3-MoE (`qwen3moe`); the token executor is still awaiting comparison with a reference model.
-- Qwen3.5 GGUF tensor index and greedy text generation for dense and MoE Qwen3.5 models; prompt prefill skips vocabulary projection until its final token, recurrent convolution/DeltaNet state and bounded full-attention KV state are held and reported separately, and matrix weights stay file-backed.
-- `pokitlms-qwen35-bench MODEL.gguf USER_MESSAGE [new_tokens] [kv_window] [kv_precision] [io_threads] [backend] [gpu_tile_mib] [gpu_device] [gpu_mode] [gpu_weight_memory=auto|local|cached]` reports prefill/decode throughput, token IDs, attention and recurrent state memory, and (for MoE) expert-cache capacity, hit counts, and read time. Vulkan runs also report weight-read, GPU, wait, and pipeline times and allocated buffer bytes. The final option compares device-local mapped memory with host-cached mapped memory; `auto` prefers host-cached memory on discrete NVIDIA GPUs and retains the local-memory preference elsewhere. Android instrumentation exposes the same choice as `pokitlms.gpuWeightMemory`. Qwen3.5 MoE I/O threads can be set from 1 to 4 for device-specific comparisons; the default is 3.
+- Qwen3.5 GGUF tensor index and greedy text generation for dense and MoE Qwen3.5 models; prompt prefill skips vocabulary projection until its final token, recurrent convolution/DeltaNet state and bounded full-attention KV state are held and reported separately, and matrix weights are read from GGUF or retained in the Vulkan cache when its budget permits.
+- `pokitlms-qwen35-bench MODEL.gguf USER_MESSAGE [new_tokens] [kv_window] [kv_precision] [io_threads] [backend] [gpu_tile_mib] [gpu_device] [gpu_mode] [gpu_weight_memory=auto|local|cached] [gpu_model_cache=auto|off]` reports prefill/decode throughput, token IDs, attention and recurrent state memory, and (for MoE) expert-cache capacity, hit counts, and read time. Vulkan runs also report weight-read, GPU, wait, pipeline, and model-cache upload times and allocated buffer bytes. `gpu_weight_memory` compares device-local mapped memory with host-cached mapped memory; `auto` prefers host-cached memory on discrete NVIDIA GPUs and retains the local-memory preference elsewhere. The model cache defaults to `auto`; use `off` to compare streaming. Android instrumentation exposes the weight-memory choice as `pokitlms.gpuWeightMemory`; model-cache selection remains automatic. Qwen3.5 MoE I/O threads can be set from 1 to 4 for device-specific comparisons; the default is 3.
 - Tied-output Qwen3-MoE GGUF support: when `output.weight` is absent, the runner reuses `token_embd.weight` for vocabulary projection.
 - Qwen3-MoE tensor-name/shape index for the model's base, attention, router, and expert tensors.
 - Qwen GPT-2 byte-level BPE encoder/decoder using GGUF vocabulary, merge, token-type, and special-token metadata.
@@ -129,8 +129,13 @@ Qwen3.5 benchmark:
 
 The final options select `cpu|vulkan` (default `cpu`), weight-window MiB
 (default `16`, range `1`–`128` per window), Vulkan device index or `auto`, and
-`subgroup|workgroup` (default `subgroup`). Auto selection prefers a discrete
-GPU, then an integrated GPU. Subgroup acceleration is used when supported;
+`subgroup|workgroup` (default `subgroup`), mapped weight-memory mode, and
+`gpu_model_cache=auto|off` (default `auto`). Auto model caching retains the
+whole GGUF on the GPU only when `VK_EXT_memory_budget` reports enough room for
+the model plus its reserve. Integrated GPUs also need host `MemAvailable` for
+the model plus a 2 GiB reserve. Otherwise, the backend streams weights through
+the two bounded windows. Auto device selection prefers a discrete GPU, then
+an integrated GPU. Subgroup acceleration is used when supported;
 the workgroup reduction provides an alternative for comparisons. An
 explicit Vulkan request fails if initialization fails; unsupported weight
 formats still use CPU dispatch.
@@ -139,11 +144,12 @@ For C++ integration, create a `pokitlms::gpu::VulkanLinearBackend` and pass
 its `shared_ptr` to `Qwen35Runner::set_linear_backend`. The runner owns the
 backend for subsequent linear operations. Qwen3-MoE remains on the CPU.
 
-`pokitlms-vulkan-probe MODEL.gguf [timing_tensor] [weights=device|cached]` checks small slices from
-real matrix tensors and compares repeated reads of a warmed window, bounded
-to 8 MiB. Its default timing tensor is `blk.0.ffn_gate.weight`. It reports
-Linux physical-read counters separately from logical bytes and never starts
-model generation.
+`pokitlms-vulkan-probe MODEL.gguf [timing_tensor] [weights=auto|local|cached] [model_cache=off|auto|full] [gpu_device=auto|N]`
+checks small slices from real matrix tensors and compares repeated reads of a
+warmed window, bounded to 8 MiB. Its default timing tensor is
+`blk.0.ffn_gate.weight`; full model-cache probing is opt-in. It reports Linux
+physical-read counters separately from logical bytes and never starts model
+generation.
 
 The initial 9B GPU run produced the same eight greedy tokens as the matching
 host CPU run and completed on Pixel 9a's Mali-G715. Performance remains

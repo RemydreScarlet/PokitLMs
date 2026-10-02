@@ -15,9 +15,16 @@ enum class VulkanWeightMemoryMode : std::uint32_t {
     Cached = 2,
 };
 
+enum class VulkanModelCacheMode : std::uint32_t {
+    Automatic = 0,
+    Disabled = 1,
+};
+
 struct VulkanLinearOptions {
-    // Two mapped weight windows are allocated. The complete model is never
-    // uploaded: positioned reads into the next window overlap GPU execution.
+    // Two mapped weight windows bound streaming weight residency. Automatic
+    // may instead retain the complete model in device-local memory when the
+    // Vulkan budget allows it, keeping a 1 GiB discrete or 2 GiB integrated
+    // reserve; integrated GPUs also require matching host MemAvailable headroom.
     std::size_t tile_bytes = 16U * 1024U * 1024U;
     std::uint32_t device_index = std::numeric_limits<std::uint32_t>::max();
     bool use_subgroups = true;
@@ -25,6 +32,7 @@ struct VulkanLinearOptions {
     // and retains the device-local preference elsewhere. Explicit modes allow
     // model-scale comparisons on a particular device.
     VulkanWeightMemoryMode weight_memory_mode = VulkanWeightMemoryMode::Automatic;
+    VulkanModelCacheMode model_cache_mode = VulkanModelCacheMode::Automatic;
     // Q4_K/Q5_K packed loads can share an SSBO word between four quant bytes.
     // Disable to retain the scalar-byte path for device-specific comparisons.
     bool use_vectorized_q4_k = true;
@@ -41,7 +49,11 @@ struct VulkanLinearStats {
     std::uint64_t pipeline_time_ns{};
     std::uint64_t cache_time_ns{};
     std::uint64_t allocated_bytes{};
+    std::uint64_t model_cache_capacity_bytes{};
+    std::uint64_t model_cache_uploaded_bytes{};
+    std::uint64_t model_cache_upload_time_ns{};
     std::uint32_t weight_memory_flags{};
+    bool model_cache_active{};
 };
 
 class VulkanLinearBackend final : public model::TensorLinearBackend {
