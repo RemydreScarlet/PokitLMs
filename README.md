@@ -48,7 +48,7 @@ These are design references, not dependencies. PokitLMs will implement its own m
 - C ABI opaque Qwen3-MoE handle for creation, serialized text generation, and cache/storage telemetry.
 - Qwen3 chat helpers for single messages and multi-turn system/user/assistant history in the C++ and C APIs.
 - Multi-turn chat keeps KV state and reuses token-identical history prefixes; generated assistant token IDs are retained so replies are not re-tokenized between turns.
-- Both model runners have deterministic tiny-GGUF generation smoke tests; the Qwen3.5 fixture includes recurrent and full-attention layers. Full-model logits and generated text have not yet been compared against a reference implementation; broader quantized format coverage and optimized ARM kernels also remain incomplete.
+- Both model runners have deterministic tiny-GGUF generation smoke tests; the Qwen3.5 fixture includes recurrent and full-attention layers. A real Qwen3.5 0.8B Q4_0 model was loaded and generated on a Pixel 9a (Android 16) through JNI; its first greedy token matched llama.cpp, while later tokens diverged after a close-logit tie. Full-logit parity, stable multi-token reference parity, Qwen3-MoE reference comparison, broader quantized format coverage, and optimized ARM kernels remain incomplete.
 
 ## Build
 
@@ -120,6 +120,11 @@ gradle -p android connectedDebugAndroidTest testDebugUnitTest
 The [Android workflow](.github/workflows/android.yml) builds the APK, runs the
 local unit tests, and runs this inference smoke test on an emulator for pushes
 and pull requests.
+
+The instrumentation suite also has an opt-in real-model JNI check. Set the
+`pokitlms.modelPath` instrumentation argument to a GGUF path readable by the
+app; it loads the model through a file descriptor and generates one token.
+Without that argument, the full-model check is skipped.
 
 The app opens GGUF files through Android's system file picker and keeps the
 selected descriptor open while the native runner reads weights from it, so it
