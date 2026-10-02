@@ -23,7 +23,8 @@
 namespace {
 struct Engine {
     Engine(const std::string& path, std::size_t expert_io_threads, bool use_vulkan,
-           [[maybe_unused]] std::size_t gpu_tile_mib, [[maybe_unused]] bool gpu_subgroups) {
+           [[maybe_unused]] std::size_t gpu_tile_mib, [[maybe_unused]] bool gpu_subgroups,
+           [[maybe_unused]] bool gpu_vectorized_q4) {
         pokitlms::model::GgufReader gguf(path);
         const auto it = gguf.metadata().find("general.architecture");
         if (it == gguf.metadata().end() || !std::holds_alternative<std::string>(it->second.value))
@@ -42,6 +43,7 @@ struct Engine {
             pokitlms::gpu::VulkanLinearOptions options;
             options.tile_bytes = gpu_tile_mib * 1024U * 1024U;
             options.use_subgroups = gpu_subgroups;
+            options.use_vectorized_q4_k = gpu_vectorized_q4;
             vulkan = std::make_shared<pokitlms::gpu::VulkanLinearBackend>(options);
             dense->set_linear_backend(vulkan);
             __android_log_print(ANDROID_LOG_INFO, "PokitLMsAB",
@@ -157,7 +159,8 @@ const char* progress_phase(pokitlms::model::Qwen35ProgressEvent::Phase phase) {
 extern "C" JNIEXPORT jlong JNICALL
 Java_org_pokit_pokitlms_NativeModelBridge_load(JNIEnv* env, jobject, jint fd,
                                                jint expert_io_threads, jboolean use_vulkan,
-                                               jint gpu_tile_mib, jboolean gpu_subgroups) {
+                                               jint gpu_tile_mib, jboolean gpu_subgroups,
+                                               jboolean gpu_vectorized_q4) {
     try {
         if (expert_io_threads < 1 || expert_io_threads > 4)
             throw std::invalid_argument("expert I/O threads must be between 1 and 4");
@@ -166,7 +169,8 @@ Java_org_pokit_pokitlms_NativeModelBridge_load(JNIEnv* env, jobject, jint fd,
         const std::string path = "/proc/self/fd/" + std::to_string(fd);
         return reinterpret_cast<jlong>(new Engine(path,
             static_cast<std::size_t>(expert_io_threads), use_vulkan == JNI_TRUE,
-            static_cast<std::size_t>(gpu_tile_mib), gpu_subgroups == JNI_TRUE));
+            static_cast<std::size_t>(gpu_tile_mib), gpu_subgroups == JNI_TRUE,
+            gpu_vectorized_q4 == JNI_TRUE));
     } catch (const std::exception& e) {
         throw_java(env, "java/lang/IllegalArgumentException", e.what());
         return 0;
@@ -215,10 +219,11 @@ Java_org_pokit_pokitlms_NativeModelBridge_generate(JNIEnv* env, jobject, jlong h
                 if (engine->vulkan && event.phase != pokitlms::model::Qwen35ProgressEvent::Phase::GeneratedToken) {
                     const auto gpu = engine->vulkan->stats();
                     __android_log_print(ANDROID_LOG_INFO, "PokitLMsAB",
-                        "event=gpu_totals calls=%llu dispatches=%llu weight_bytes=%llu "
+                        "event=gpu_totals calls=%llu dispatches=%llu vectorized_q4_k_calls=%llu weight_bytes=%llu "
                         "read_ms=%.3f wait_ms=%.3f gpu_ms=%.3f pipeline_ms=%.3f cache_ms=%.3f allocated_bytes=%llu",
                         static_cast<unsigned long long>(gpu.linear_calls),
                         static_cast<unsigned long long>(gpu.dispatches),
+                        static_cast<unsigned long long>(gpu.vectorized_q4_k_calls),
                         static_cast<unsigned long long>(gpu.weight_bytes),
                         static_cast<double>(gpu.read_time_ns) / 1'000'000.0,
                         static_cast<double>(gpu.wait_time_ns) / 1'000'000.0,

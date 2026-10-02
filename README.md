@@ -187,7 +187,8 @@ Its native code is compiled with `-O2`; the ordinary Debug variant has no native
 optimization and must not be used to report inference speed. The full-model
 check also accepts `pokitlms.maxTokens`, `pokitlms.ioThreads`,
 `pokitlms.backend=cpu|vulkan`, `pokitlms.gpuTileMiB`,
-`pokitlms.gpuMode=subgroup|workgroup`, and `pokitlms.prompt`. The `PokitLMsAB`
+`pokitlms.gpuMode=subgroup|workgroup`, `pokitlms.gpuVectorizedQ4=true|false`,
+and `pokitlms.prompt`. The `PokitLMsAB`
 logcat tag records each prompt/decoded token, wall time, process CPU time,
 RSS/swap, system available memory, and the prefill/decode summary. Vulkan
 events also identify the GPU and report cumulative transfer/compute counters.

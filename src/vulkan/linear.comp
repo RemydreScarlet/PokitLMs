@@ -9,6 +9,7 @@
 
 layout(local_size_x = 128) in;
 layout(constant_id = 0) const uint weight_type = 12;
+layout(constant_id = 1) const bool vectorized_q4_k = false;
 layout(set = 0, binding = 0, std430) readonly buffer Weights { uint w[]; };
 layout(set = 0, binding = 1, std430) readonly buffer Input { float x[]; };
 layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
@@ -111,10 +112,65 @@ float element(uint base, uint col) {
 
 #ifndef USE_SUBGROUP
 shared float partial[128];
+#else
+shared float q4_partial[8];
 #endif
 
 void main() {
 #ifdef USE_SUBGROUP
+    if (vectorized_q4_k && gl_SubgroupSize >= 16 && gl_SubgroupSize <= 32 &&
+        (weight_type == 12 || weight_type == 13)) {
+        uint groups_per_subgroup = gl_SubgroupSize / 8;
+        uint groups_per_row = 4 / groups_per_subgroup;
+        uint row_in_group = gl_SubgroupID / groups_per_row;
+        uint group_in_row = gl_SubgroupID % groups_per_row;
+        uint row = gl_WorkGroupID.x * 4 + row_in_group;
+        uint subgroup_group = gl_SubgroupInvocationID / 8;
+        uint lane_in_group = gl_SubgroupInvocationID % 8;
+        precise float sum = 0.0;
+        if (row < p.rows) {
+            bool q5 = weight_type == 13;
+            for (uint b = 0; b < p.columns / 256; ++b) {
+                uint block = row * p.row_bytes + b * (q5 ? 176 : 144);
+                float d = half_at(block), dm = half_at(block + 2);
+                uint chunk = group_in_row * groups_per_subgroup + subgroup_group;
+                uvec2 s0 = scale_min(block + 4, chunk * 2);
+                uvec2 s1 = scale_min(block + 4, chunk * 2 + 1);
+                uint byte_base = block + (q5 ? 48 : 16) + chunk * 32 + lane_in_group * 4;
+                uint packed_word = w[byte_base / 4];
+                uint high_word = q5 ? w[(block + 16 + lane_in_group * 4) / 4] : 0;
+                for (uint j = 0; j < 4; ++j) {
+                    uint packed = (packed_word >> (j * 8)) & 255;
+                    uint lo = packed & 15, hi = packed >> 4;
+                    if (q5) {
+                        uint high = (high_word >> (j * 8)) & 255;
+                        lo |= ((high >> (chunk * 2)) & 1) << 4;
+                        hi |= ((high >> (chunk * 2 + 1)) & 1) << 4;
+                    }
+                    uint column = b * 256 + chunk * 64 + lane_in_group * 4 + j;
+                    precise float a = d * float(s0.x) * float(lo) - dm * float(s0.y);
+                    precise float z = d * float(s1.x) * float(hi) - dm * float(s1.y);
+                    sum += a * x[column];
+                    sum += z * x[column + 32];
+                }
+            }
+        }
+        float subtotal = subgroupAdd(sum);
+        if (groups_per_row == 1) {
+            if (subgroupElect()) y[p.output_first + row] = subtotal;
+        } else {
+            if (gl_SubgroupInvocationID == 0)
+                q4_partial[row_in_group * groups_per_row + group_in_row] = subtotal;
+            barrier();
+            if (group_in_row == 0 && gl_SubgroupInvocationID == 0 && row < p.rows) {
+                precise float result = q4_partial[row_in_group * groups_per_row];
+                for (uint group = 1; group < groups_per_row; ++group)
+                    result += q4_partial[row_in_group * groups_per_row + group];
+                y[p.output_first + row] = result;
+            }
+        }
+        return;
+    }
     uint lane = gl_SubgroupInvocationID, stride = gl_SubgroupSize;
     uint row = gl_WorkGroupID.x * (128 / gl_SubgroupSize) + gl_SubgroupID;
     if (row >= p.rows) return;

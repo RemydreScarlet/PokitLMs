@@ -18,6 +18,7 @@ The real-model test accepts the following instrumentation arguments:
 | `pokitlms.backend` | `cpu` | `cpu` or `vulkan`; Vulkan accelerates Qwen3.5 linear operations. |
 | `pokitlms.gpuTileMiB` | `16` | Capacity of each of the two GPU weight windows. |
 | `pokitlms.gpuMode` | `subgroup` | `subgroup` or `workgroup` reduction. |
+| `pokitlms.gpuVectorizedQ4` | `true` | Enable packed Q4_K/Q5_K subgroup shader path; set `false` for A/B. |
 | `pokitlms.prompt` | `hi` | User message passed to the model's chat template. |
 | `pokitlms.expectedReply` | unset | Optional exact reply assertion. |
 | `pokitlms.checkVulkan` | unset | Set `true` to run the optional shader diagnostics. |
@@ -110,9 +111,9 @@ The host CMake option is `POKITLMS_USE_VULKAN=ON`, with Python 3, Vulkan
 headers/loader, and `glslc` required. Android Gradle builds enable Vulkan and
 find the NDK's host shader compiler. The C++ API installs a shared
 `VulkanLinearBackend` through `Qwen35Runner::set_linear_backend`; JNI accepts
-`useVulkan`, `gpuTileMiB`, and `gpuSubgroups` when loading the model. Explicit
-Vulkan initialization errors are surfaced to the caller. Qwen3-MoE remains
-on the CPU.
+`useVulkan`, `gpuTileMiB`, `gpuSubgroups`, and `gpuVectorizedQ4` when loading
+the model. Explicit Vulkan initialization errors are surfaced to the caller.
+Qwen3-MoE remains on the CPU.
 
 ## Initial Vulkan measurements, 2026-10-02
 
@@ -148,9 +149,36 @@ remain unverified. No full 35B inference was run for these Vulkan measurements.
 A later CPU run on the same Pixel 9a and model used the rebuilt benchmark APK,
 the same `hi` prompt, and the same eight-token limit. It completed in
 174,997 ms, with 90,462.123 ms prefill and 84,529.856 ms for seven decode
-forwards. Its eight token IDs and displayed reply matched the Vulkan run
-above. Since the comparison Vulkan run used the earlier APK, this is not a
-controlled before/after comparison; the rebuilt Vulkan run remains pending.
+forwards. Its eight token IDs and displayed reply matched the Vulkan runs
+below. The CPU result is a separate run, so it is not a controlled paired
+comparison.
+
+### Q4_K/Q5_K packed shader A/B
+
+The subgroup shader can load four adjacent packed quant bytes with one SSBO
+word read and distribute each subgroup's eight-lane groups across Q4_K/Q5_K
+chunks. It is enabled by default on subgroup sizes 16 and 32, and can be
+disabled with `pokitlms.gpuVectorizedQ4=false`. On the Pixel 9a's Mali-G715
+subgroup-16 GPU, randomized Vulkan/CPU parity passed with maximum absolute
+errors 3.05e-5 for Q4_K and 6.87e-5 for Q5_K. The optimized path ran six times
+in that test; the scalar comparison path and both reduction modes also
+passed.
+
+Four full-model runs used the same Qwen3.5-9B Q4_K_M file, prompt `hi`, eight
+generated tokens, and 16 MiB windows. All runs produced the same token IDs:
+`248068,271,248069,271,9419,0,2500,628`.
+
+| Q4_K/Q5_K path | Run 1 total / prefill / decode (ms) | Run 2 total / prefill / decode (ms) | Mean total (s) | Mean decode forwards/s | Mean GPU time (s) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Scalar (`gpuVectorizedQ4=false`) | 140,758 / 76,567 / 64,188 | 148,938 / 79,816 / 69,118 | 144.85 | 0.105 | 50.75 |
+| Packed (`gpuVectorizedQ4=true`) | 143,323 / 77,207 / 66,113 | 147,884 / 80,148 / 67,729 | 145.60 | 0.105 | 47.07 |
+
+The packed path reduced cumulative GPU execution time by about 7.3%, while
+full generation time was effectively unchanged: its two-run mean was 0.5%
+slower. Run-to-run wall-time variation was 5.8%, much larger than the mean
+path difference. The shader change improves the measured GPU kernel portion,
+but does not produce a measurable end-to-end token-rate gain on this device
+and workload.
 
 ### Weight delivery and cache state
 
@@ -181,13 +209,18 @@ small cached case, while showing that the full run's hundreds-of-MB/s read
 rate cannot be explained by those warm mapped writes alone. The probe does
 not reproduce full-model cache churn or establish a single cause.
 
-During the completed phone CPU run, the process recorded approximately
-77.0 GB of physical storage reads across 78.5 GB of logical weight reads.
-Each prefill step added around 4.4 GB of physical reads, with RSS near 250 MiB
-and system `MemAvailable` around 1.2 GiB. This points to repeated storage
-reads as a major cost for this 9B phone run. The process memory stayed around
-250 MiB while the test ran; further clock and thermal measurements are needed
-for a controlled GPU comparison.
+During the later phone CPU run, the process recorded approximately 77.0 GB of
+physical storage reads across 78.5 GB of logical weight reads. In the four
+Vulkan A/B runs, each run read 78.5 GB of logical weights and about 78.6 GB
+from storage. The 9B GGUF itself is 6.17 GB: these larger figures are
+cumulative traffic across nine prompt forwards and seven decode forwards,
+averaging about 4.9 GB per forward. Nearly all repeated reads reached storage
+instead of being served from cache. Vulkan `read_ms` averaged 105.6-106.8
+seconds; it includes copying from the file/page cache into mapped Vulkan
+memory and overlaps other work. The process RSS stayed around 0.3 GiB, with
+roughly 1.4-1.5 GiB system `MemAvailable`. Repeated weight delivery is the
+dominant measured cost; the 16 MiB double buffer avoids loading the full model
+into memory but cannot retain weights between forwards.
 
 On NVIDIA, the initial memory-selection policy favors uncached host-visible
 device-local BAR memory over cached system memory. On Mali, it favors cached

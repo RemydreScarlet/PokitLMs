@@ -34,6 +34,7 @@ class AndroidInferenceSmokeTest {
         val gpuMode = arguments.getString("pokitlms.gpuMode") ?: "subgroup"
         check(gpuMode == "subgroup" || gpuMode == "workgroup")
         val gpuSubgroups = gpuMode == "subgroup"
+        val gpuVectorizedQ4 = arguments.getString("pokitlms.gpuVectorizedQ4") != "false"
         val prompt = arguments.getString("pokitlms.prompt") ?: "hi"
         check(backend == "cpu" || backend == "vulkan")
         val model = File(modelPath!!)
@@ -41,12 +42,13 @@ class AndroidInferenceSmokeTest {
 
         val bridge = NativeModelBridge()
         ParcelFileDescriptor.open(model, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-            val handle = bridge.load(descriptor.fd, ioThreads, backend == "vulkan", gpuTileMiB, gpuSubgroups)
+            val handle = bridge.load(descriptor.fd, ioThreads, backend == "vulkan", gpuTileMiB,
+                gpuSubgroups, gpuVectorizedQ4)
             try {
                 val start = SystemClock.elapsedRealtimeNanos()
                 val reply = bridge.generate(handle, prompt, maxTokens)
                 val elapsedMs = (SystemClock.elapsedRealtimeNanos() - start) / 1_000_000
-                Log.i("PokitLMsAB", "backend=$backend gpu_tile_mib=$gpuTileMiB gpu_subgroups=$gpuSubgroups io_threads=$ioThreads max_tokens=$maxTokens elapsed_ms=$elapsedMs reply=$reply")
+                Log.i("PokitLMsAB", "backend=$backend gpu_tile_mib=$gpuTileMiB gpu_subgroups=$gpuSubgroups gpu_vectorized_q4=$gpuVectorizedQ4 io_threads=$ioThreads max_tokens=$maxTokens elapsed_ms=$elapsedMs reply=$reply")
                 assertTrue(reply.isNotEmpty())
                 arguments.getString("pokitlms.expectedReply")?.let { expected ->
                     assertEquals(expected, reply)

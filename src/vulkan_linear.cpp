@@ -91,6 +91,7 @@ public:
     ~Impl() { shutdown(); }
 
     void initialize(const VulkanLinearOptions& options) {
+        options_vectorized_q4_k = options.use_vectorized_q4_k;
         auto app = info<VkApplicationInfo>(VK_STRUCTURE_TYPE_APPLICATION_INFO);
         app.pApplicationName = "PokitLMs";
         app.apiVersion = VK_API_VERSION_1_1;
@@ -162,6 +163,7 @@ public:
             (subgroup.supportedOperations & needed) == needed && subgroup.subgroupSize &&
             subgroup.subgroupSize <= 128 && 128 % subgroup.subgroupSize == 0 &&
             size_control && full.computeFullSubgroups;
+        subgroup_size = use_subgroups ? subgroup.subgroupSize : 0;
         rows_per_group = use_subgroups ? 128 / subgroup.subgroupSize : 1;
         description = properties.deviceName;
         description += use_subgroups ? " subgroup=" + std::to_string(subgroup.subgroupSize) : " workgroup=128";
@@ -283,11 +285,17 @@ public:
         buffer.allocation = requirements.size;
     }
 
-    VkPipeline pipeline(std::uint32_t type) {
-        if (auto found = pipelines.find(type); found != pipelines.end()) return found->second;
+    VkPipeline pipeline(std::uint32_t type, bool vectorized_q4_k) {
+        const auto key = type | (vectorized_q4_k ? 0x100U : 0U);
+        if (auto found = pipelines.find(key); found != pipelines.end()) return found->second;
         const auto start = Clock::now();
-        VkSpecializationMapEntry entry{0, 0, sizeof(type)};
-        VkSpecializationInfo specialization{1, &entry, sizeof(type), &type};
+        struct SpecializationData { std::uint32_t type; VkBool32 vectorized_q4_k; } data{
+            type, vectorized_q4_k ? VK_TRUE : VK_FALSE};
+        const std::array<VkSpecializationMapEntry, 2> entries{{
+            {0, offsetof(SpecializationData, type), sizeof(data.type)},
+            {1, offsetof(SpecializationData, vectorized_q4_k), sizeof(data.vectorized_q4_k)}}};
+        VkSpecializationInfo specialization{static_cast<std::uint32_t>(entries.size()), entries.data(),
+                                            sizeof(data), &data};
         auto stage = info<VkPipelineShaderStageCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO);
         stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         stage.module = shader;
@@ -299,7 +307,7 @@ public:
         create.layout = pipeline_layout;
         VkPipeline result{};
         check(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &create, nullptr, &result), "create compute pipeline");
-        try { pipelines.emplace(type, result); }
+        try { pipelines.emplace(key, result); }
         catch (...) { vkDestroyPipeline(device, result, nullptr); throw; }
         counters.pipeline_time_ns += ns_since(start);
         return result;
@@ -322,7 +330,8 @@ public:
     }
 
     void submit(std::size_t slot, VkPipeline compute, std::uint32_t columns,
-                std::uint32_t rows, std::uint32_t row_bytes, std::uint32_t first) {
+                std::uint32_t rows, std::uint32_t row_bytes, std::uint32_t first,
+                std::uint32_t rows_per_workgroup) {
         auto command = command_buffers[slot];
         check(vkResetCommandBuffer(command, 0), "reset command buffer");
         auto begin = info<VkCommandBufferBeginInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
@@ -342,7 +351,7 @@ public:
                                 &descriptor_sets[slot], 0, nullptr);
         const std::array<std::uint32_t, 4> push{columns, rows, row_bytes, first};
         vkCmdPushConstants(command, pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), push.data());
-        vkCmdDispatch(command, (rows + rows_per_group - 1) / rows_per_group, 1, 1);
+        vkCmdDispatch(command, (rows + rows_per_workgroup - 1) / rows_per_workgroup, 1, 1);
         if (query_pool) vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, slot * 2 + 1);
         barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -384,7 +393,11 @@ public:
         std::lock_guard lock(mutex);
         if (failed) throw std::runtime_error("Vulkan backend failed during an earlier operation");
         try {
-            auto compute = pipeline(tensor.type);
+            const bool vectorized_q4_k = options_vectorized_q4_k && use_subgroups &&
+                (subgroup_size == 16 || subgroup_size == 32) &&
+                (tensor.type == 12 || tensor.type == 13);
+            const std::uint32_t dispatch_rows_per_group = vectorized_q4_k ? 4 : rows_per_group;
+            auto compute = pipeline(tensor.type, vectorized_q4_k);
             ensure_buffer(input_buffer, input.size_bytes());
             ensure_buffer(output_buffer, output.size_bytes(), true);
             std::memcpy(input_buffer.mapped, input.data(), input.size_bytes());
@@ -410,7 +423,7 @@ public:
             const auto row_bytes = reader.row_bytes();
             auto rows_per_tile = tile_bytes / row_bytes;
             rows_per_tile = std::min<std::size_t>(rows_per_tile,
-                static_cast<std::size_t>(properties.limits.maxComputeWorkGroupCount[0]) * rows_per_group);
+                static_cast<std::size_t>(properties.limits.maxComputeWorkGroupCount[0]) * dispatch_rows_per_group);
             std::size_t tile = 0;
             for (std::size_t first = 0; first < output.size(); ++tile) {
                 const auto slot = tile % 2;
@@ -425,7 +438,8 @@ public:
                 cache_start = Clock::now();
                 weights[slot].flush(bytes);
                 counters.cache_time_ns += ns_since(cache_start);
-                submit(slot, compute, input.size(), rows, row_bytes, first);
+                submit(slot, compute, input.size(), rows, row_bytes, first,
+                       dispatch_rows_per_group);
                 first += rows;
             }
             wait_slot(0);
@@ -435,6 +449,7 @@ public:
             counters.cache_time_ns += ns_since(cache_start);
             std::memcpy(output.data(), output_buffer.mapped, output.size_bytes());
             ++counters.linear_calls;
+            if (vectorized_q4_k) ++counters.vectorized_q4_k_calls;
             counters.allocated_bytes = input_buffer.allocation + output_buffer.allocation;
             for (const auto& buffer : weights) counters.allocated_bytes += buffer.allocation;
             return true;
@@ -475,8 +490,9 @@ public:
     VkDevice device{};
     VkQueue queue{};
     std::uint32_t queue_family{}, rows_per_group{}, timestamp_bits{};
+    std::uint32_t subgroup_size{};
     VkDeviceSize tile_bytes{};
-    bool use_subgroups{}, failed{};
+    bool use_subgroups{}, options_vectorized_q4_k{}, failed{};
     std::array<Buffer, 2> weights;
     Buffer input_buffer, output_buffer;
     VkCommandPool command_pool{};

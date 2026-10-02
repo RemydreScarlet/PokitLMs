@@ -18,11 +18,15 @@ struct VulkanLinearOptions {
     // Diagnostic comparison for discrete GPUs: cached system memory versus
     // mapped device memory. Integrated GPUs normally have cached local memory.
     bool prefer_host_cached_weights = false;
+    // Q4_K/Q5_K packed loads can share an SSBO word between four quant bytes.
+    // Disable to retain the scalar-byte path for device-specific comparisons.
+    bool use_vectorized_q4_k = true;
 };
 
 struct VulkanLinearStats {
     std::uint64_t linear_calls{};
     std::uint64_t dispatches{};
+    std::uint64_t vectorized_q4_k_calls{};
     std::uint64_t weight_bytes{};
     std::uint64_t read_time_ns{};
     std::uint64_t wait_time_ns{};

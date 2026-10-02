@@ -8,6 +8,7 @@
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 // Shared by the host Vulkan test and the opt-in Android diagnostics. Uses
 // nonzero scales, mixed signed values, multiple blocks, partial output groups,
@@ -19,10 +20,12 @@ inline std::string run_vulkan_linear_checks() {
         state ^= state << 13; state ^= state >> 17; state ^= state << 5;
         return state;
     };
-    for (bool subgroup : {true, false}) {
+    for (const auto [subgroup, vectorized_q4_k] :
+         {std::pair{true, true}, std::pair{true, false}, std::pair{false, true}}) {
         pokitlms::gpu::VulkanLinearOptions options;
         options.tile_bytes = 4096;
         options.use_subgroups = subgroup;
+        options.use_vectorized_q4_k = vectorized_q4_k;
         pokitlms::gpu::VulkanLinearBackend backend(options);
         report << "device=" << backend.device_name() << '\n';
         for (std::uint32_t type : {0U, 1U, 30U, 2U, 3U, 8U, 12U, 13U, 14U}) {
@@ -89,7 +92,14 @@ inline std::string run_vulkan_linear_checks() {
         if (stats.dispatches <= stats.linear_calls || stats.linear_calls != 27) {
             throw std::runtime_error("Vulkan tests did not exercise stream window reuse");
         }
+        const bool subgroup_size_supported = backend.device_name().find("subgroup=16") != std::string::npos ||
+                                             backend.device_name().find("subgroup=32") != std::string::npos;
+        const auto expected_vectorized = subgroup && vectorized_q4_k && subgroup_size_supported ? 6U : 0U;
+        if (stats.vectorized_q4_k_calls != expected_vectorized) {
+            throw std::runtime_error("Vulkan test did not exercise the requested Q4_K/Q5_K path");
+        }
         report << "calls=" << stats.linear_calls << " dispatches=" << stats.dispatches
+               << " vectorized_q4_k_calls=" << stats.vectorized_q4_k_calls
                << " allocated_bytes=" << stats.allocated_bytes << '\n';
     }
     return "PASS\n" + report.str();
