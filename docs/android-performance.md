@@ -251,6 +251,29 @@ roughly 1.4-1.5 GiB system `MemAvailable`. Repeated weight delivery is the
 dominant measured cost; the double buffer avoids loading the full model into
 memory but cannot retain weights between forwards.
 
+An additional host Vulkan cache-state comparison used the same 9B file,
+`hi` prompt, GTX 1080, 4 MiB windows, subgroup size 32, and device-local mapped
+weight memory (flags `7`). The first run's cache state was not controlled; the
+second run immediately followed it and benefited from the warmed OS file
+cache. Both produced token `248068`; the second also produced token `271`.
+
+| Run | Prompt / generated tokens | Prefill / decode (s) | Logical weight bytes | Process physical reads | `read_ms` / `gpu_ms` (s) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| First, cache state unknown | 9 / 1 | 32.980 / no decode forward | 41,236,119,552 | 11,793,883,136 | 31.797 / 1.570 |
+| Immediate warm repeat | 9 / 2 | 8.164 / 1.479 (one decode forward) | 46,559,559,680 | 1,198,280,704 | 8.644 / 1.325 |
+
+The warm repeat performed one additional decode forward yet recorded about
+90% fewer physical reads. This demonstrates that the host OS file cache can
+substantially reduce storage traffic when the model's working set is resident;
+it does not isolate cache state from run-to-run variation, and `read_ms`
+includes copying file/page-cache data into mapped Vulkan memory. Host
+`MemAvailable` stayed near 6.7 GiB during the repeat, compared with 1.4-1.5
+GiB during the Pixel 9a measurements above. The host result therefore explains
+why the phone rereads more data but is not a phone performance estimate.
+Raw outputs are retained on persistent storage at
+`$HOME/.local/share/pokitlms-tools/logs/qwen35-9b-nvidia-one-token-20261002.log`
+and `qwen35-9b-nvidia-warm-two-token-20261002.log`.
+
 On NVIDIA, the initial memory-selection policy favors uncached host-visible
 device-local BAR memory over cached system memory. On Mali, it favors cached
 host-visible device-local memory. Vulkan documents BAR memory as appropriate
